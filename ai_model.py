@@ -1,114 +1,57 @@
-from logger import (
-    log_info,
-    log_error
-)
-
-
-def ai_confirmation(
-    trend_df,
-    confirm_df,
-    entry_df,
-    signal
-):
+def ai_confidence_boost(trend_df, confirm_df, entry_df, signal):
 
     try:
 
-        trend = trend_df.iloc[-2]
+        boost = 0
 
         confirm = confirm_df.iloc[-2]
-
         entry = entry_df.iloc[-2]
+        trend = trend_df.iloc[-2]
 
-        confidence = 0
+        support = trend_df['low'].rolling(50).min().iloc[-1]
+        resistance = trend_df['high'].rolling(50).max().iloc[-1]
+        price = trend_df['close'].iloc[-1]
 
-        # =========================
-        # BUY CONFIRMATION
-        # =========================
-        if signal == "BUY":
+        resistance_distance = ((resistance - price) / price) * 100
+        support_distance = ((price - support) / price) * 100
 
-            # TREND EMA
-            if (
-                trend['ema50'] >
-                trend['ema200']
-            ):
-                confidence += 25
+        # ======================
+        # ADX FILTER
+        # ======================
+        if confirm['adx'] < 18:
+            boost -= 5
 
-            # TREND STRENGTH
-            if trend['adx'] > 20:
-                confidence += 15
+        if confirm['adx'] > 25:
+            boost += 5
 
-            # MACD MOMENTUM
-            if (
-                confirm['macd'] >
-                confirm['macd_signal']
-            ):
-                confidence += 20
+        # ======================
+        # RSI EXTREMES
+        # ======================
+        if signal == "BUY" and confirm['rsi'] > 75:
+            boost -= 8
 
-            # RSI STRENGTH
-            if confirm['rsi'] > 52:
-                confidence += 15
+        if signal == "SELL" and confirm['rsi'] < 25:
+            boost -= 8
 
-            # ENTRY EMA20
-            if (
-                entry['close'] >
-                entry['ema20']
-            ):
-                confidence += 10
+        # ======================
+        # VOLUME CONFIRMATION
+        # ======================
+        if entry['volume'] > entry['volume_sma'] * 1.2:
+            boost += 5
 
-            # ENTRY VOLUME
-            if (
-                entry['volume'] >
-                entry['volume_sma']
-            ):
-                confidence += 15
+        # ======================
+        # TREND ALIGNMENT
+        # ======================
+        if signal == "BUY" and trend['ema50'] > trend['ema200'] and resistance_distance > 2:
+            boost += 5
 
-        # =========================
-        # SELL CONFIRMATION
-        # =========================
-        elif signal == "SELL":
+        if signal == "SELL" and trend['ema50'] < trend['ema200'] and support_distance > 2:
+            boost += 5
 
-            # TREND EMA
-            if (
-                trend['ema50'] <
-                trend['ema200']
-            ):
-                confidence += 25
+        # ======================
+        # FINAL CLAMP
+        # ======================
+        return max(-15, min(15, boost))
 
-            # TREND STRENGTH
-            if trend['adx'] > 20:
-                confidence += 15
-
-            # MACD MOMENTUM
-            if (
-                confirm['macd'] <
-                confirm['macd_signal']
-            ):
-                confidence += 20
-
-            # RSI WEAKNESS
-            if confirm['rsi'] < 48:
-                confidence += 15
-
-            # ENTRY EMA20
-            if (
-                entry['close'] <
-                entry['ema20']
-            ):
-                confidence += 10
-
-            # ENTRY VOLUME
-            if (
-                entry['volume'] >
-                entry['volume_sma']
-            ):
-                confidence += 15
-
-        return confidence
-
-    except Exception as e:
-
-        log_error(
-            f"AI MODEL ERROR: {e}"
-        )
-
+    except Exception:
         return 0

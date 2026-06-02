@@ -1,88 +1,78 @@
 import pandas as pd
-
-from ta.trend import EMAIndicator
-from ta.trend import MACD
-from ta.trend import ADXIndicator
-
-from ta.momentum import RSIIndicator
+import numpy as np
 
 
 def apply_indicators(df):
 
     try:
 
-        # EMA 20
-        ema20 = EMAIndicator(
-        close=df['close'],
-        window=20
-        )
+        df = df.copy()
 
-        df['ema20'] = ema20.ema_indicator()
+        # =========================
+        # EMA INDICATORS
+        # =========================
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
 
-        # EMA 50
-        ema50 = EMAIndicator(
-            close=df['close'],
-            window=50
-        )
-
-        df['ema50'] = ema50.ema_indicator()
-
-        # EMA 200
-        ema200 = EMAIndicator(
-            close=df['close'],
-            window=200
-        )
-
-        df['ema200'] = ema200.ema_indicator()
-
+        # =========================
         # RSI
-        rsi = RSIIndicator(
-            close=df['close'],
-            window=14
-        )
+        # =========================
+        delta = df['close'].diff()
 
-        df['rsi'] = rsi.rsi()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
 
+        rs = gain / (loss + 1e-10)
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        # =========================
         # MACD
-        macd = MACD(
-            close=df['close']
-        )
+        # =========================
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
 
-        df['macd'] = macd.macd()
+        df['macd'] = ema12 - ema26
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-        df['macd_signal'] = macd.macd_signal()
-
+        # =========================
         # ADX
-        adx = ADXIndicator(
-            high=df['high'],
-            low=df['low'],
-            close=df['close'],
-            window=14
-        )
+        # =========================
+        high = df['high']
+        low = df['low']
+        close = df['close']
 
-        df['adx'] = adx.adx()
+        plus_dm = high.diff()
+        minus_dm = low.diff().abs()
 
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+
+        atr = tr.rolling(14).mean()
+
+        plus_di = 100 * (plus_dm.rolling(14).mean() / (atr + 1e-10))
+        minus_di = 100 * (minus_dm.rolling(14).mean() / (atr + 1e-10))
+
+        dx = (abs(plus_di - minus_di) /
+              (plus_di + minus_di + 1e-10)) * 100
+
+        df['adx'] = dx.rolling(14).mean()
+
+        # =========================
         # VOLUME SMA
-        df['volume_sma'] = (
-            df['volume']
-            .rolling(20)
-            .mean()
-        )
+        # =========================
+        df['volume_sma'] = df['volume'].rolling(20).mean()
 
-        # REMOVE NaN
+        # =========================
+        # CLEANUP
+        # =========================
         df.dropna(inplace=True)
-
-        df.reset_index(
-            drop=True,
-            inplace=True
-        )
 
         return df
 
     except Exception as e:
-
-        print(
-            f"INDICATOR ERROR: {e}"
-        )
-
-        return pd.DataFrame()
+        print(f"INDICATORS ERROR: {e}")
+        return None

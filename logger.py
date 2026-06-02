@@ -1,7 +1,10 @@
 from colorama import Fore, init
 import logging
+import os
 
 init(autoreset=True)
+
+os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
     filename='logs/bot.log',

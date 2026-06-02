@@ -96,7 +96,7 @@ def get_unrealized_pnl():
 
 from datetime import datetime
 
-from exchange import client
+#from exchange import client
 
 
 def get_today_realized_pnl():
@@ -143,33 +143,75 @@ def get_today_realized_pnl():
 
         return 0
 
-def get_klines(symbol, interval, limit=500):
+def get_klines(
+    symbol,
+    interval,
+    limit=500
+):
 
-    klines = client.futures_klines(
-        symbol=symbol,
-        interval=interval,
-        limit=limit
-    )
+    try:
 
-    df = pd.DataFrame(klines)
+        klines = client.futures_klines(
+            symbol=symbol,
+            interval=interval,
+            limit=limit
+        )
 
-    df = df.iloc[:, :6]
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                'time',
+                'open',
+                'high',
+                'low',
+                'close',
+                'volume',
+                'close_time',
+                'qav',
+                'trades',
+                'tbbav',
+                'tbqav',
+                'ignore'
+            ]
+        )
 
-    df.columns = [
-        'time',
-        'open',
-        'high',
-        'low',
-        'close',
-        'volume'
-    ]
+        # =========================
+        # CONVERT TO FLOAT
+        # =========================
+        df['open'] = (
+            df['open']
+            .astype(float)
+        )
 
-    df['close'] = df['close'].astype(float)
-    df['high'] = df['high'].astype(float)
-    df['low'] = df['low'].astype(float)
-    df['volume'] = df['volume'].astype(float)
+        df['high'] = (
+            df['high']
+            .astype(float)
+        )
 
-    return df
+        df['low'] = (
+            df['low']
+            .astype(float)
+        )
+
+        df['close'] = (
+            df['close']
+            .astype(float)
+        )
+
+        df['volume'] = (
+            df['volume']
+            .astype(float)
+        )
+
+        return df
+
+    except Exception as e:
+
+        log_error(
+            f"{symbol} KLINES ERROR: {e}"
+        )
+
+        return None
 
 
 def place_market_order(symbol, side, quantity):
@@ -261,6 +303,42 @@ def get_entry_price(symbol):
 
     return entry_price
 
+def get_market_structure_levels(symbol):
+
+    try:
+
+        df = get_klines(
+            symbol,
+            config.TREND_TIMEFRAME
+        )
+
+        if df is None or len(df) < 60:
+            return None, None
+
+        support = (
+            df['low']
+            .rolling(50)
+            .min()
+            .iloc[-1]
+        )
+
+        resistance = (
+            df['high']
+            .rolling(50)
+            .max()
+            .iloc[-1]
+        )
+
+        return support, resistance
+
+    except Exception as e:
+
+        log_error(
+            f"{symbol} structure error: {e}"
+        )
+
+        return None, None
+
 def place_tp_sl(symbol, side, entry_price, quantity):
 
     try:
@@ -283,23 +361,20 @@ def place_tp_sl(symbol, side, entry_price, quantity):
         # =========================
         if side == SIDE_BUY:
 
+            support, resistance = (
+                get_market_structure_levels(symbol)
+            )
+
+            if support is None or resistance is None:
+                return
+
             tp_price = round(
-                entry_price * (
-                    1 + (
-                        config.ROI_PERCENT_TP /
-                        config.LEVERAGE
-                    ) / 100
-                ),
+                resistance,
                 precision
             )
 
             sl_price = round(
-                entry_price * (
-                    1 - (
-                        config.ROI_PERCENT_SL /
-                        config.LEVERAGE
-                    ) / 100
-                ),
+                support,
                 precision
             )
 
@@ -327,23 +402,20 @@ def place_tp_sl(symbol, side, entry_price, quantity):
         # =========================
         else:
 
+            support, resistance = (
+                get_market_structure_levels(symbol)
+            )
+
+            if support is None or resistance is None:
+                return
+
             tp_price = round(
-                entry_price * (
-                    1 - (
-                        config.ROI_PERCENT_TP /
-                        config.LEVERAGE
-                    ) / 100
-                ),
+                support,
                 precision
             )
 
             sl_price = round(
-                entry_price * (
-                    1 + (
-                        config.ROI_PERCENT_SL /
-                        config.LEVERAGE
-                    ) / 100
-                ),
+                resistance,
                 precision
             )
 

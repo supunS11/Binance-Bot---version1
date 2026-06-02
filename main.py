@@ -20,20 +20,10 @@ from exchange import (
 )
 
 from indicators import apply_indicators
-
 from strategy import check_signal
+from risk_management import calculate_position_size
+from logger import log_info, log_warning, log_error
 
-from risk_management import (
-    calculate_position_size
-)
-
-from ai_model import ai_confirmation
-
-from logger import (
-    log_info,
-    log_warning,
-    log_error
-)
 
 # STORE TRADE TIMES
 trade_times = {}
@@ -47,14 +37,11 @@ def run_bot():
 
         try:
 
-            # LOOP THROUGH SYMBOLS
             for symbol in config.SYMBOLS:
 
                 try:
 
-                    log_info(
-                        f"Checking {symbol}"
-                    )
+                    log_info(f"Checking {symbol}")
 
                     # =========================
                     # CHECK CLOSED POSITIONS
@@ -64,14 +51,9 @@ def run_bot():
                         if is_position_closed(symbol):
 
                             exit_time = datetime.now()
+                            entry_time = trade_times[symbol]['entry_time']
 
-                            entry_time = (
-                                trade_times[symbol]['entry_time']
-                            )
-
-                            duration = (
-                                exit_time - entry_time
-                            )
+                            duration = exit_time - entry_time
 
                             log_info(
                                 f"*** {symbol} TRADE CLOSED *** | "
@@ -87,396 +69,156 @@ def run_bot():
                     # =========================
                     if has_open_position(symbol):
 
-                        log_warning(
-                            f"{symbol} already has open position"
-                        )
-
+                        log_warning(f"{symbol} already has open position")
                         continue
 
                     # =========================
-                    # GET MULTI TIMEFRAME DATA
+                    # GET DATA
                     # =========================
-                    trend_df = get_klines(
-                        symbol,
-                        config.TREND_TIMEFRAME
-                    )
+                    trend_df = get_klines(symbol, config.TREND_TIMEFRAME)
+                    confirm_df = get_klines(symbol, config.CONFIRMATION_TIMEFRAME)
+                    entry_df = get_klines(symbol, config.ENTRY_TIMEFRAME)
 
-                    confirm_df = get_klines(
-                        symbol,
-                        config.CONFIRMATION_TIMEFRAME
-                    )
+                    if trend_df is None or confirm_df is None or entry_df is None:
+                        log_warning(f"{symbol} dataframe empty")
+                        continue
 
-                    entry_df = get_klines(
-                        symbol,
-                        config.ENTRY_TIMEFRAME
-                    )
-
-                    # =========================
-                    # CHECK EMPTY DATA
-                    # =========================
-                    if (
-                        trend_df is None
-                        or confirm_df is None
-                        or entry_df is None
-                    ):
-
-                        log_warning(
-                            f"{symbol} dataframe empty"
-                        )
-
+                    if len(trend_df) < 250 or len(confirm_df) < 250 or len(entry_df) < 250:
+                        log_warning(f"{symbol} insufficient candle data")
                         continue
 
                     # =========================
-                    # CHECK DATA LENGTH
+                    # INDICATORS
                     # =========================
-                    if (
-                        len(trend_df) < 250
-                        or len(confirm_df) < 250
-                        or len(entry_df) < 250
-                    ):
+                    trend_df = apply_indicators(trend_df)
+                    confirm_df = apply_indicators(confirm_df)
+                    entry_df = apply_indicators(entry_df)
 
-                        log_warning(
-                            f"{symbol} insufficient candle data"
-                        )
+                    if trend_df is None or confirm_df is None or entry_df is None:
+                        log_warning(f"{symbol} indicator failure")
+                        continue
 
+                    if len(trend_df) < 2 or len(confirm_df) < 2 or len(entry_df) < 2:
+                        log_warning(f"{symbol} insufficient indicator data")
                         continue
 
                     # =========================
-                    # APPLY INDICATORS
+                    # SIGNAL
                     # =========================
-                    trend_df = apply_indicators(
-                        trend_df
-                    )
+                    signal = check_signal(trend_df, confirm_df, entry_df)
 
-                    confirm_df = apply_indicators(
-                        confirm_df
-                    )
+                    if not signal:
+                        log_warning(f"{symbol} NO SIGNAL FOUND")
+                        time.sleep(2)
+                        continue
 
-                    entry_df = apply_indicators(
-                        entry_df
-                    )
+                    log_info(f"{symbol} {signal} SIGNAL DETECTED")
 
                     # =========================
-                    # CHECK DATA AFTER INDICATORS
+                    # POSITION LIMITS
                     # =========================
-                    if (
-                        len(trend_df) < 2
-                        or len(confirm_df) < 2
-                        or len(entry_df) < 2
-                    ):
+                    counts = get_open_position_counts()
 
-                        log_warning(
-                            f"{symbol} insufficient indicator data"
-                        )
+                    if config.MAX_TOTAL_POSITIONS and counts['total'] >= config.MAX_TOTAL_POSITIONS:
+                        log_warning("MAX TOTAL POSITIONS REACHED")
+                        continue
 
+                    if signal == "BUY":
+                        if config.MAX_BUY_POSITIONS and counts['buy'] >= config.MAX_BUY_POSITIONS:
+                            log_warning("MAX BUY POSITIONS REACHED")
+                            continue
+
+                    if signal == "SELL":
+                        if config.MAX_SELL_POSITIONS and counts['sell'] >= config.MAX_SELL_POSITIONS:
+                            log_warning("MAX SELL POSITIONS REACHED")
+                            continue
+
+                    # =========================
+                    # ACCOUNT DATA
+                    # =========================
+                    balance = get_balance()
+                    totalMarginBalance = get_margin_balance()
+                    totalUnrealizedProfit = get_unrealized_pnl()
+
+                    current_price = entry_df['close'].iloc[-2]
+
+                    # =========================
+                    # POSITION SIZE
+                    # =========================
+                    quantity = calculate_position_size(balance, current_price, symbol)
+
+                    if quantity <= 0:
+                        log_warning(f"{symbol} invalid quantity")
+                        continue
+
+                    log_info(f"{symbol} Quantity: {quantity}")
+
+                    # =========================
+                    # LEVERAGE
+                    # =========================
+                    if not setup_leverage(symbol):
+                        log_warning(f"{symbol} leverage setup failed")
                         continue
 
                     # =========================
-                    # GET LATEST CANDLES
+                    # PLACE ORDER
                     # =========================
-                    trend = trend_df.iloc[-2]
+                    if signal == "BUY":
 
-                    confirm = confirm_df.iloc[-2]
+                        place_market_order(symbol, SIDE_BUY, quantity)
+                        time.sleep(2)
 
-                    entry = entry_df.iloc[-2]
+                        entry_price = get_entry_price(symbol)
+
+                        place_tp_sl(symbol, SIDE_BUY, entry_price, quantity)
+
+                    elif signal == "SELL":
+
+                        place_market_order(symbol, SIDE_SELL, quantity)
+                        time.sleep(2)
+
+                        entry_price = get_entry_price(symbol)
+
+                        place_tp_sl(symbol, SIDE_SELL, entry_price, quantity)
+
+                    time.sleep(1)
 
                     # =========================
-                    # DEBUG LOGS
+                    # STORE TRADE
                     # =========================
+                    trade_times[symbol] = {
+                        "entry_time": datetime.now(),
+                        "side": signal
+                    }
+
+                    # =========================
+                    # LOG SUMMARY
+                    # =========================
+                    orderCounts = get_open_position_counts()
+
                     log_info(
-                        f"{symbol} | "
-                        f"Trend EMA50: {trend['ema50']} | "
-                        f"Trend EMA200: {trend['ema200']} | "
-                        f"Confirm RSI: {confirm['rsi']} | "
-                        f"Confirm ADX: {confirm['adx']} | "
-                        f"Entry Price: {entry['close']} | "
-                        f"Entry EMA20: {entry['ema20']}"
+                        f"*** {symbol} TRADE OPENED ***\n"
+                        f"ENTRY TIME: {trade_times[symbol]['entry_time']}\n"
+                        f"Wallet Balance: {balance} USDT\n"
+                        f"Margin Balance: {totalMarginBalance} USDT\n"
+                        f"Unrealized PNL: {totalUnrealizedProfit} USDT\n"
+                        f"TOTAL: {orderCounts['total']} | "
+                        f"BUY: {orderCounts['buy']} | "
+                        f"SELL: {orderCounts['sell']}"
                     )
 
-                    # =========================
-                    # GET SIGNAL
-                    # =========================
-                    signal = check_signal(
-                        trend_df,
-                        confirm_df,
-                        entry_df
-                    )
-
-                    if signal:
-
-                        log_info(
-                            f"{symbol} "
-                            f"{signal} SIGNAL DETECTED"
-                        )
-
-                        # =========================
-                        # AI CONFIRMATION
-                        # =========================
-                        confidence = ai_confirmation(
-                            trend_df,
-                            confirm_df,
-                            entry_df,
-                            signal
-                        )
-
-                        log_info(
-                            f"{symbol} AI Confidence: "
-                            f"{confidence}%"
-                        )
-
-                        # =========================
-                        # CONFIDENCE FILTER
-                        # =========================
-                        if confidence >= 55:
-
-                            # GET POSITION COUNTS
-                            counts = (
-                                get_open_position_counts()
-                            )
-
-                            # =========================
-                            # BLOCK TOTAL LIMIT
-                            # =========================
-                            if (
-                                config.MAX_TOTAL_POSITIONS
-                                is not None
-                                and counts['total'] >=
-                                config.MAX_TOTAL_POSITIONS
-                            ):
-
-                                log_warning(
-                                    f"{counts['total']} : MAX TOTAL POSITIONS REACHED"
-                                )
-
-                                continue
-
-                            # =========================
-                            # BLOCK BUY LIMIT
-                            # =========================
-                            if signal == "BUY":
-
-                                if (
-                                    config.MAX_BUY_POSITIONS
-                                    is not None
-                                    and counts['buy'] >=
-                                    config.MAX_BUY_POSITIONS
-                                ):
-
-                                    log_warning(
-                                        "MAX BUY POSITIONS REACHED"
-                                    )
-
-                                    continue
-
-                            # =========================
-                            # BLOCK SELL LIMIT
-                            # =========================
-                            elif signal == "SELL":
-
-                                if (
-                                    config.MAX_SELL_POSITIONS
-                                    is not None
-                                    and counts['sell'] >=
-                                    config.MAX_SELL_POSITIONS
-                                ):
-
-                                    log_warning(
-                                        "MAX SELL POSITIONS REACHED"
-                                    )
-
-                                    continue
-
-                            # =========================
-                            # GET BALANCE
-                            # =========================
-                            balance = get_balance()
-
-                            totalMarginBalance = (
-                                get_margin_balance()
-                            )
-
-                            totalUnrealizedProfit = (
-                                get_unrealized_pnl()
-                            )
-
-                            # =========================
-                            # CURRENT PRICE
-                            # =========================
-                            current_price = (
-                                entry['close']
-                            )
-
-                            # =========================
-                            # CALCULATE POSITION SIZE
-                            # =========================
-                            quantity = (
-                                calculate_position_size(
-                                    balance,
-                                    current_price,
-                                    symbol
-                                )
-                            )
-
-                            # INVALID QUANTITY
-                            if quantity <= 0:
-
-                                log_warning(
-                                    f"{symbol} invalid quantity"
-                                )
-
-                                continue
-
-                            log_info(
-                                f"{symbol} Quantity: "
-                                f"{quantity}"
-                            )
-
-                            # =========================
-                            # SET LEVERAGE
-                            # =========================
-                            if not setup_leverage(symbol):
-
-                                log_warning(
-                                    f"{symbol} trade skipped"
-                                )
-
-                                continue
-
-                            # =========================
-                            # BUY ORDER
-                            # =========================
-                            if signal == "BUY":
-
-                                place_market_order(
-                                    symbol,
-                                    SIDE_BUY,
-                                    quantity
-                                )
-
-                                time.sleep(2)
-
-                                entry_price = (
-                                    get_entry_price(symbol)
-                                )
-
-                                place_tp_sl(
-                                    symbol,
-                                    SIDE_BUY,
-                                    entry_price,
-                                    quantity
-                                )
-
-                            # =========================
-                            # SELL ORDER
-                            # =========================
-                            elif signal == "SELL":
-
-                                place_market_order(
-                                    symbol,
-                                    SIDE_SELL,
-                                    quantity
-                                )
-
-                                time.sleep(2)
-
-                                entry_price = (
-                                    get_entry_price(symbol)
-                                )
-
-                                place_tp_sl(
-                                    symbol,
-                                    SIDE_SELL,
-                                    entry_price,
-                                    quantity
-                                )
-
-                            time.sleep(1)
-
-                            # =========================
-                            # SAVE ENTRY TIME
-                            # =========================
-                            trade_times[symbol] = {
-                                "entry_time": datetime.now()
-                            }
-
-                            # =========================
-                            # GET UPDATED POSITION COUNTS
-                            # =========================
-                            orderCounts = (
-                                get_open_position_counts()
-                            )
-
-                            # =========================
-                            # TRADE LOGS
-                            # =========================
-                            log_info(
-                                f"*** {symbol} TRADE OPENED ***\n"
-                                f"ENTRY TIME: "
-                                f"{trade_times[symbol]['entry_time']}"
-                            )
-
-                            log_info(
-                                f"Wallet Balance: "
-                                f"{balance} USDT"
-                            )
-
-                            log_info(
-                                f"Margin Balance: "
-                                f"{totalMarginBalance} USDT"
-                            )
-
-                            log_info(
-                                f"Unrealized PNL: "
-                                f"{totalUnrealizedProfit} USDT"
-                            )
-
-                            log_info(
-                                f"TOTAL: {orderCounts['total']} | "
-                                f"BUY: {orderCounts['buy']} | "
-                                f"SELL: {orderCounts['sell']}"
-                            )
-
-                        else:
-
-                            log_warning(
-                                f"{symbol} confidence too low"
-                            )
-
-                    else:
-
-                        log_warning(
-                            f"{symbol} NO SIGNAL FOUND"
-                        )
-
-                    # =========================
-                    # DELAY BETWEEN SYMBOLS
-                    # =========================
                     time.sleep(2)
 
                 except Exception as e:
+                    log_error(f"{symbol} error: {e}")
 
-                    log_error(
-                        f"{symbol} error: {e}"
-                    )
-
-            # =========================
-            # WAIT BEFORE NEXT SCAN
-            # =========================
-            log_info(
-                "Waiting for next scan..."
-            )
-
+            log_info("Waiting for next scan...")
             time.sleep(30)
 
         except Exception as e:
-
-            log_error(
-                f"MAIN LOOP ERROR: {e}"
-            )
-
+            log_error(f"MAIN LOOP ERROR: {e}")
             time.sleep(30)
 
 
 if __name__ == "__main__":
-
     run_bot()
