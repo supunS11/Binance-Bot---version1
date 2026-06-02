@@ -2,7 +2,7 @@ from logger import log_info, log_error
 from ai_model import ai_confidence_boost
 
 
-def score_to_confidence(score, max_score=12):
+def score_to_confidence(score, max_score=13):
 
     if score <= 0:
         return 0
@@ -109,17 +109,23 @@ def check_signal(trend_df, confirm_df, entry_df):
         # REVERSAL DETECTION BUY
         # ======================
 
+        recent_high = (
+            trend_df['high']
+            .iloc[-20:-5]
+            .max()
+        )
+
         bullish_structure_break = (
-            trend_df['high'].iloc[-1] >
-            trend_df['high'].iloc[-3]
+            trend_df['close'].iloc[-1] >
+            recent_high
         )
 
         bullish_macd_cross = (
-            confirm_df['macd'].iloc[-2] <
-            confirm_df['macd_signal'].iloc[-2]
+            confirm_df['macd'].iloc[-3] <=
+            confirm_df['macd_signal'].iloc[-3]
             and
-            confirm_df['macd'].iloc[-1] >
-            confirm_df['macd_signal'].iloc[-1]
+            confirm_df['macd'].iloc[-2] >
+            confirm_df['macd_signal'].iloc[-2]
         )
 
         bullish_rsi_cross = (
@@ -129,7 +135,7 @@ def check_signal(trend_df, confirm_df, entry_df):
         )
 
         if bullish_structure_break:
-            buy_score += 1
+            buy_score += 2
 
         if bullish_macd_cross:
             buy_score += 1
@@ -206,17 +212,23 @@ def check_signal(trend_df, confirm_df, entry_df):
         # REVERSAL DETECTION SELL
         # ======================
 
+        recent_low = (
+            trend_df['low']
+            .iloc[-20:-5]
+            .min()
+        )
+
         bearish_structure_break = (
-            trend_df['low'].iloc[-1] <
-            trend_df['low'].iloc[-3]
+            trend_df['close'].iloc[-1] <
+            recent_low
         )
 
         bearish_macd_cross = (
-            confirm_df['macd'].iloc[-2] >
-            confirm_df['macd_signal'].iloc[-2]
+            confirm_df['macd'].iloc[-3] >=
+            confirm_df['macd_signal'].iloc[-3]
             and
-            confirm_df['macd'].iloc[-1] <
-            confirm_df['macd_signal'].iloc[-1]
+            confirm_df['macd'].iloc[-2] <
+            confirm_df['macd_signal'].iloc[-2]
         )
 
         bearish_rsi_cross = (
@@ -226,7 +238,7 @@ def check_signal(trend_df, confirm_df, entry_df):
         )
 
         if bearish_structure_break:
-            sell_score += 1
+            sell_score += 2
 
         if bearish_macd_cross:
             sell_score += 1
@@ -298,7 +310,7 @@ def check_signal(trend_df, confirm_df, entry_df):
         # FINAL DECISION
         # ======================
         if (
-            buy_conf >= 75 and
+            buy_conf >= 80 and
             buy_conf > sell_conf
         ):
 
@@ -310,7 +322,7 @@ def check_signal(trend_df, confirm_df, entry_df):
             return "BUY"
 
         if (
-            sell_conf >= 75 and
+            sell_conf >= 80 and
             sell_conf > buy_conf
         ):
 
