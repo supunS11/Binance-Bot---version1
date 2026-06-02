@@ -96,7 +96,7 @@ def get_unrealized_pnl():
 
 from datetime import datetime
 
-#from exchange import client
+from exchange import client
 
 
 def get_today_realized_pnl():
@@ -303,42 +303,6 @@ def get_entry_price(symbol):
 
     return entry_price
 
-def get_market_structure_levels(symbol):
-
-    try:
-
-        df = get_klines(
-            symbol,
-            config.TREND_TIMEFRAME
-        )
-
-        if df is None or len(df) < 60:
-            return None, None
-
-        support = (
-            df['low']
-            .rolling(50)
-            .min()
-            .iloc[-1]
-        )
-
-        resistance = (
-            df['high']
-            .rolling(50)
-            .max()
-            .iloc[-1]
-        )
-
-        return support, resistance
-
-    except Exception as e:
-
-        log_error(
-            f"{symbol} structure error: {e}"
-        )
-
-        return None, None
-
 def place_tp_sl(symbol, side, entry_price, quantity):
 
     try:
@@ -361,20 +325,23 @@ def place_tp_sl(symbol, side, entry_price, quantity):
         # =========================
         if side == SIDE_BUY:
 
-            support, resistance = (
-                get_market_structure_levels(symbol)
-            )
-
-            if support is None or resistance is None:
-                return
-
             tp_price = round(
-                resistance,
+                entry_price * (
+                    1 + (
+                        config.ROI_PERCENT_TP /
+                        config.LEVERAGE
+                    ) / 100
+                ),
                 precision
             )
 
             sl_price = round(
-                support,
+                entry_price * (
+                    1 - (
+                        config.ROI_PERCENT_SL /
+                        config.LEVERAGE
+                    ) / 100
+                ),
                 precision
             )
 
@@ -402,20 +369,23 @@ def place_tp_sl(symbol, side, entry_price, quantity):
         # =========================
         else:
 
-            support, resistance = (
-                get_market_structure_levels(symbol)
-            )
-
-            if support is None or resistance is None:
-                return
-
             tp_price = round(
-                support,
+                entry_price * (
+                    1 - (
+                        config.ROI_PERCENT_TP /
+                        config.LEVERAGE
+                    ) / 100
+                ),
                 precision
             )
 
             sl_price = round(
-                resistance,
+                entry_price * (
+                    1 + (
+                        config.ROI_PERCENT_SL /
+                        config.LEVERAGE
+                    ) / 100
+                ),
                 precision
             )
 
