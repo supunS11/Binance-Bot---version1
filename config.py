@@ -7,25 +7,20 @@ API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 SYMBOLS = os.getenv("SYMBOLS").split(",")
-#TIMEFRAME = os.getenv("TIMEFRAME")
 
 TREND_TIMEFRAME = os.getenv("TREND_TIMEFRAME")
-
 CONFIRMATION_TIMEFRAME = os.getenv("CONFIRMATION_TIMEFRAME")
-
 ENTRY_TIMEFRAME = os.getenv("ENTRY_TIMEFRAME")
 
 LEVERAGE = int(os.getenv("LEVERAGE"))
 
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE"))
-
 ROI_PERCENT_TP = float(os.getenv("ROI_PERCENT_TP"))
+MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
-ROI_PERCENT_SL = float(os.getenv("ROI_PERCENT_SL"))
-
-MARGIN_TYPE = os.getenv("MARGIN_TYPE","ISOLATED").upper()
-
+MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MODE = os.getenv("MODE")
+
+MARGIN_PER_TRADE = float(os.getenv("MARGIN_PER_TRADE", 6))
 
 MAX_TOTAL_POSITIONS = (
     int(os.getenv("MAX_TOTAL_POSITIONS"))
