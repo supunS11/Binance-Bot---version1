@@ -1,3 +1,5 @@
+import config
+
 def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, btc_corr=None, rs=None):
 
     try:
@@ -14,6 +16,11 @@ def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, 
 
         resistance_distance = ((resistance - price) / price) * 100
         support_distance = ((price - support) / price) * 100
+
+        required_distance = (
+            config.ROI_PERCENT_TP /
+            config.LEVERAGE
+        ) + 0.5
 
         # ======================
         # ADX FILTER (IMPROVED ALIGNMENT)
@@ -42,10 +49,10 @@ def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, 
         # TREND ALIGNMENT
         # ======================
         if signal == "BUY":
-            if trend['ema50'] > trend['ema200'] and resistance_distance > 2:
+            if trend['ema50'] > trend['ema200'] and resistance_distance > required_distance:
                 boost += 5
         else:
-            if trend['ema50'] < trend['ema200'] and support_distance > 2:
+            if trend['ema50'] < trend['ema200'] and support_distance > required_distance:
                 boost += 5
 
         # ======================
