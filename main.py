@@ -15,15 +15,15 @@ from exchange import (
     is_position_closed,
     setup_leverage,
     get_entry_price,
-    get_margin_balance,
-    get_unrealized_pnl,
     get_btc_trend,
     get_btc_correlation,
     get_relative_strength
 )
 
 from indicators import apply_indicators
-from strategy import check_signal, get_structure_stop_loss
+from strategy import check_signal
+from exchange import get_structure_stop_loss
+from ai_model import ai_confidence_boost
 from risk_management import calculate_position_size
 from logger import log_info, log_warning, log_error
 
@@ -43,37 +43,20 @@ def run_bot():
 
                 try:
 
-                    log_info(f"Checking {symbol}")
+                    # =========================
+                    # CLEANUP CLOSED TRADES
+                    # =========================
+                    if symbol in trade_times and is_position_closed(symbol):
+                        del trade_times[symbol]
 
                     # =========================
-                    # CLOSE TRACKING
-                    # =========================
-                    if symbol in trade_times:
-
-                        if is_position_closed(symbol):
-
-                            exit_time = datetime.now()
-                            entry_time = trade_times[symbol]['entry_time']
-                            duration = exit_time - entry_time
-
-                            log_info(
-                                f"*** {symbol} TRADE CLOSED *** | "
-                                f"ENTRY: {entry_time} | "
-                                f"EXIT: {exit_time} | "
-                                f"DURATION: {duration}"
-                            )
-
-                            del trade_times[symbol]
-
-                    # =========================
-                    # POSITION CHECK
+                    # SKIP IF OPEN POSITION EXISTS
                     # =========================
                     if has_open_position(symbol):
-                        log_warning(f"{symbol} already has open position")
                         continue
 
                     # =========================
-                    # DATA
+                    # DATA FETCH
                     # =========================
                     trend_df = get_klines(symbol, config.TREND_TIMEFRAME)
                     confirm_df = get_klines(symbol, config.CONFIRMATION_TIMEFRAME)
@@ -82,12 +65,6 @@ def run_bot():
                     if trend_df is None or confirm_df is None or entry_df is None:
                         continue
 
-                    if len(trend_df) < 250 or len(confirm_df) < 250 or len(entry_df) < 250:
-                        continue
-
-                    # =========================
-                    # INDICATORS
-                    # =========================
                     trend_df = apply_indicators(trend_df)
                     confirm_df = apply_indicators(confirm_df)
                     entry_df = apply_indicators(entry_df)
@@ -96,18 +73,14 @@ def run_bot():
                         continue
 
                     # =========================
-                    # BTC CONTEXT
+                    # CONTEXT DATA
                     # =========================
                     btc_trend = get_btc_trend()
                     btc_corr = get_btc_correlation(symbol)
                     rs = get_relative_strength(symbol)
 
-                    log_info(f"{symbol} BTC CORR: {btc_corr}")
-                    log_info(f"BTC TREND: {btc_trend}")
-                    log_info(f"{symbol} RS: {rs}%")
-
                     # =========================
-                    # SIGNAL
+                    # SIGNAL GENERATION
                     # =========================
                     signal = check_signal(
                         trend_df,
@@ -118,16 +91,38 @@ def run_bot():
                         rs
                     )
 
+                    log_info(
+                        f"SMC DEBUG | \n"
+                        f"Signal={signal} \n"
+                        f"BullBias={btc_trend} \n"
+                        f"Corr={btc_corr} \n"
+                        f"RS={rs}"
+                    )
+
                     if not signal:
                         log_warning(
                             f"{symbol} NO SIGNAL | "
-                            f"BTC={btc_trend} | "
-                            f"CORR={btc_corr} | "
-                            f"RS={rs}"
                         )
                         continue
 
                     log_info(f"{symbol} SIGNAL: {signal}")
+
+                    # =========================
+                    # AI CONFIRMATION GATE (IMPORTANT)
+                    # =========================
+                    ai_score = ai_confidence_boost(
+                        trend_df,
+                        confirm_df,
+                        entry_df,
+                        signal,
+                        btc_trend,
+                        btc_corr,
+                        rs
+                    )
+
+                    if ai_score < -5:
+                        log_warning(f"{symbol} AI REJECTED SIGNAL | score={ai_score}")
+                        continue
 
                     # =========================
                     # POSITION LIMITS
@@ -160,12 +155,12 @@ def run_bot():
                         continue
 
                     # =========================
-                    # PRICE (PRE-ENTRY)
+                    # PRICE
                     # =========================
                     current_price = entry_df['close'].iloc[-2]
 
                     # =========================
-                    # STRUCTURE SL (PRE-RISK CHECK)
+                    # STRUCTURE STOP LOSS (FIXED)
                     # =========================
                     sl_price = get_structure_stop_loss(confirm_df, signal)
 
@@ -173,21 +168,16 @@ def run_bot():
                         continue
 
                     # =========================
-                    # SL RISK VALIDATION (CRITICAL FIX)
+                    # SL SAFETY CHECK
                     # =========================
-                    risk_pct = abs(current_price - sl_price) / current_price
-                    sl_roi = risk_pct * config.LEVERAGE * 100
+                    risk_pct = abs(current_price - sl_price) / current_price * 100
 
-                    log_info(f"{symbol} PRE-TRADE SL ROI: {sl_roi:.2f}%")
-
-                    MAX_SL_ROI = config.MAX_SL_ROI
-
-                    if sl_roi > MAX_SL_ROI:
-                        log_warning(f"{symbol} SKIP | SL TOO LARGE: {sl_roi:.2f}%")
+                    if risk_pct > 3:   # adjust per leverage strategy
+                        log_warning(f"{symbol} SKIP | SL TOO LARGE: {risk_pct:.2f}%")
                         continue
 
                     # =========================
-                    # POSITION SIZE (FIXED)
+                    # POSITION SIZE (REAL RISK BASED)
                     # =========================
                     balance = get_balance()
 
@@ -199,26 +189,16 @@ def run_bot():
                         config.MARGIN_PER_TRADE
                     )
 
-                    notional = quantity * current_price
-
-                    log_info(
-                        f"{symbol} QTY={quantity} | NOTIONAL={notional:.2f}"
-                    )
-
                     if quantity <= 0:
-                        log_warning(f"{symbol} SKIPPED | INVALID QTY")
-                        continue
-
-                    log_info(f"{symbol} QTY: {quantity}")
-
-                    # =========================
-                    # LEVERAGE
-                    # =========================
-                    if not setup_leverage(symbol):
                         continue
 
                     # =========================
-                    # PLACE ORDER
+                    # LEVERAGE SETUP
+                    # =========================
+                    setup_leverage(symbol)
+
+                    # =========================
+                    # EXECUTION
                     # =========================
                     side = SIDE_BUY if signal == "BUY" else SIDE_SELL
 
@@ -226,10 +206,11 @@ def run_bot():
 
                     time.sleep(2)
 
+                    # safer entry price
                     entry_price = get_entry_price(symbol)
 
                     # =========================
-                    # PLACE TP/SL
+                    # TP / SL PLACEMENT
                     # =========================
                     place_tp_sl(
                         symbol,
@@ -240,37 +221,29 @@ def run_bot():
                     )
 
                     # =========================
-                    # STORE TRADE
+                    # TRADE TRACKING
                     # =========================
                     trade_times[symbol] = {
                         "entry_time": datetime.now(),
-                        "side": signal
+                        "side": signal,
+                        "entry_price": entry_price,
+                        "sl": sl_price
                     }
 
                     # =========================
-                    # LOG SUMMARY
+                    # LIVE POSITION COUNT LOG
                     # =========================
-                    log_info(
-                        f"*** {symbol} TRADE OPENED ***\n"
-                        f"ENTRY: {entry_price}\n"
-                        f"SL: {sl_price}\n"
-                        f"SL ROI: {sl_roi:.2f}%\n"
-                        f"BALANCE: {balance}\n"
-                    )
-
-                    orderCounts = get_open_position_counts()
+                    counts = get_open_position_counts()
 
                     log_info(
-                        f"{symbol} OPENED | TOTAL={orderCounts['total']} | "
-                        f"BUY={orderCounts['buy']} | SELL={orderCounts['sell']}"
+                        f"{symbol} TRADE OPENED | "
+                        f"TOTAL={counts['total']} | "
+                        f"BUY={counts['buy']} | SELL={counts['sell']}"
                     )
-
-                    time.sleep(2)
 
                 except Exception as e:
                     log_error(f"{symbol} ERROR: {e}")
 
-            log_info("Waiting next scan...")
             time.sleep(30)
 
         except Exception as e:

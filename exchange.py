@@ -251,12 +251,12 @@ def get_structure_stop_loss(df, side):
 
         if side == SIDE_BUY:
 
-            swing_low = df['low'].iloc[-10:-1].min()
+            swing_low = df['low'].iloc[-5:-1].min()
             return swing_low - (atr * 0.5)
 
         else:
 
-            swing_high = df['high'].iloc[-10:-1].max()
+            swing_high = df['high'].iloc[-5:-1].max()
             return swing_high + (atr * 0.5)
 
     except Exception as e:
@@ -383,15 +383,26 @@ def get_btc_correlation(symbol):
 def get_btc_trend():
 
     try:
+        btc_df = get_klines("BTCUSDT", config.TREND_TIMEFRAME, 100)
 
-        btc_df = get_klines("BTCUSDT", config.TREND_TIMEFRAME)
-        btc_df = apply_indicators(btc_df)
+        if btc_df is None or len(btc_df) < 20:
+            return "NEUTRAL"
 
-        btc = btc_df.iloc[-2]
+        close = btc_df['close']
 
-        if btc['ema50'] > btc['ema200']:
+        # =========================
+        # STRUCTURE-BASED TREND
+        # =========================
+        higher_high = close.iloc[-1] > close.iloc[-5]
+        higher_low = close.iloc[-2] > close.iloc[-6]
+
+        lower_high = close.iloc[-1] < close.iloc[-5]
+        lower_low = close.iloc[-2] < close.iloc[-6]
+
+        if higher_high and higher_low:
             return "BULLISH"
-        elif btc['ema50'] < btc['ema200']:
+
+        if lower_high and lower_low:
             return "BEARISH"
 
         return "NEUTRAL"

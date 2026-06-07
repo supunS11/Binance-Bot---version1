@@ -2,351 +2,206 @@ from logger import log_info, log_error
 from ai_model import ai_confidence_boost
 
 
-def score_to_confidence(score, max_score=24):
-
-    if score <= 0:
-        return 0
-
-    confidence = (score / max_score) * 100
-    confidence = confidence ** 1.15
-
-    return round(min(confidence, 100), 2)
-
-
 # =========================================================
-# STRUCTURE-BASED STOP LOSS (NEW - SAFE ADDITION)
+# MARKET BIAS (NEW CORE FILTER)
 # =========================================================
-def get_structure_stop_loss(df, side):
+def get_market_bias(trend_df):
 
     try:
-        atr = df['atr'].iloc[-1]
+        close = trend_df['close'].iloc[-2]
 
-        if side == "BUY":
+        ema50 = trend_df['ema50'].iloc[-2]
+        ema200 = trend_df['ema200'].iloc[-2]
 
-            swing_low = df['low'].iloc[-10:-1].min()
-            return swing_low - (atr * 0.5)
+        if ema50 > ema200 and close > ema50:
+            return "BULLISH"
 
-        else:
+        if ema50 < ema200 and close < ema50:
+            return "BEARISH"
 
-            swing_high = df['high'].iloc[-10:-1].max()
-            return swing_high + (atr * 0.5)
+        return "RANGE"
 
     except Exception as e:
-        log_error(f"STRUCTURE SL ERROR: {e}")
-        return None
+        log_error(f"BIAS ERROR: {e}")
+        return "RANGE"
 
 
 # =========================================================
-# LIQUIDITY SWEEP DETECTION (UNCHANGED)
+# STRUCTURE
 # =========================================================
-def detect_liquidity_sweep(df):
+def detect_structure(df):
 
     try:
+        swing_high = df['high'].rolling(10).max().iloc[-6]
+        swing_low = df['low'].rolling(10).min().iloc[-6]
 
-        prev_high = df['high'].iloc[-3]
-        prev_low = df['low'].iloc[-3]
+        hh = df['high'].iloc[-2] > swing_high
+        ll = df['low'].iloc[-2] < swing_low
 
-        last_high = df['high'].iloc[-1]
-        last_low = df['low'].iloc[-1]
-        close = df['close'].iloc[-1]
+        bos_up = df['close'].iloc[-1] > swing_high
+        bos_down = df['close'].iloc[-1] < swing_low
 
-        bullish_sweep = (
-            last_low < prev_low and
-            close > prev_low
-        )
+        return {
+            "bos_up": bos_up,
+            "bos_down": bos_down,
+            "hh": hh,
+            "ll": ll
+        }
 
-        bearish_sweep = (
-            last_high > prev_high and
-            close < prev_high
-        )
+    except Exception as e:
+        log_error(f"STRUCTURE ERROR: {e}")
+        return {"bos_up": False, "bos_down": False, "hh": False, "ll": False}
 
-        return bullish_sweep, bearish_sweep
+
+# =========================================================
+# LIQUIDITY (EQ HIGH / LOW)
+# =========================================================
+def detect_liquidity(df):
+
+    try:
+        eq_highs = abs(df['high'].iloc[-1] - df['high'].iloc[-3]) / df['high'].iloc[-1] < 0.002
+        eq_lows = abs(df['low'].iloc[-1] - df['low'].iloc[-3]) / df['low'].iloc[-1] < 0.002
+
+        return eq_highs, eq_lows
 
     except Exception:
         return False, False
 
 
 # =========================================================
-# ORDER BLOCK DETECTION (UNCHANGED)
+# DISPLACEMENT
 # =========================================================
-def detect_order_block(df):
+def detect_displacement(df):
 
     try:
+        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+        prev_body = abs(df['close'].iloc[-2] - df['open'].iloc[-2])
 
-        body = abs(df['close'] - df['open'])
-
-        idx = body.iloc[-20:].idxmax()
-
-        ob_high = df['high'].loc[idx]
-        ob_low = df['low'].loc[idx]
-
-        ob_type = (
-            "BULLISH"
-            if df['close'].loc[idx] > df['open'].loc[idx]
-            else "BEARISH"
-        )
-
-        return ob_high, ob_low, ob_type
+        return body > prev_body * 1.5
 
     except Exception:
+        return False
+
+
+# =========================================================
+# ORDER BLOCK
+# =========================================================
+def get_order_block_v2(df):
+
+    try:
+        for i in range(-2, -10, -1):
+
+            body = abs(df['close'].iloc[i] - df['open'].iloc[i])
+            prev_body = abs(df['close'].iloc[i-1] - df['open'].iloc[i-1])
+
+            if body > prev_body * 1.5:
+
+                ob_idx = i - 1
+
+                ob_high = df['high'].iloc[ob_idx]
+                ob_low = df['low'].iloc[ob_idx]
+
+                ob_type = "BULLISH" if df['close'].iloc[ob_idx] > df['open'].iloc[ob_idx] else "BEARISH"
+
+                return ob_high, ob_low, ob_type
+
+        return None, None, None
+
+    except Exception as e:
+        log_error(f"OB ERROR: {e}")
         return None, None, None
 
 
 # =========================================================
-# MAIN SIGNAL ENGINE (UNCHANGED LOGIC)
+# MAIN SIGNAL ENGINE (SMC v2 + BIAS FILTER)
 # =========================================================
 def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
     try:
 
-        trend = trend_df.iloc[-2]
-        confirm = confirm_df.iloc[-2]
-        entry = entry_df.iloc[-2]
-
-        support = trend_df['low'].rolling(50).min().iloc[-1]
-        resistance = trend_df['high'].rolling(50).max().iloc[-1]
-        price = trend_df['close'].iloc[-1]
-
-        bullish_sweep, bearish_sweep = detect_liquidity_sweep(confirm_df)
-        ob_high, ob_low, ob_type = detect_order_block(confirm_df)
-
-        atr_pct = (entry['atr'] / entry['close']) * 100
-
-        log_info(f"ATR%: {round(atr_pct, 2)}")
+        price = entry_df['close'].iloc[-1]
 
         # ======================
-        # ATR FILTER
+        # MARKET BIAS (NEW GATE)
         # ======================
-        if atr_pct < 0.2 or atr_pct > 3.0:
-            log_info(f"ATR FILTER BLOCKED | ATR%: {round(atr_pct, 2)}")
+        bias = get_market_bias(trend_df)
+
+        # ======================
+        # SMC CORE
+        # ======================
+        structure = detect_structure(trend_df)
+        eq_highs, eq_lows = detect_liquidity(confirm_df)
+        displacement = detect_displacement(confirm_df)
+        ob_high, ob_low, ob_type = get_order_block_v2(confirm_df)
+
+        in_ob = ob_low is not None and ob_low <= price <= ob_high
+
+        # ======================
+        # BUY CONDITION
+        # ======================
+        buy_condition = (
+            structure["bos_up"]
+            #and eq_lows
+            and displacement
+            and ob_type == "BULLISH"
+            and in_ob
+        )
+
+        # ======================
+        # SELL CONDITION
+        # ======================
+        sell_condition = (
+            structure["bos_down"]
+            #and eq_highs
+            and displacement
+            and ob_type == "BEARISH"
+            and in_ob
+        )
+
+        signal = None
+
+        if buy_condition:
+            signal = "BUY"
+
+        elif sell_condition:
+            signal = "SELL"
+
+        if signal is None:
             return None
 
-        ema_gap_pct = ((trend['ema50'] - trend['ema200']) / trend['ema200']) * 100
+        # =========================================================
+        # 🚨 MARKET BIAS FILTER (MAIN FIX FOR YOUR PROBLEM)
+        # =========================================================
 
-        # ======================
-        # REGIME
-        # ======================
-        regime = "NORMAL"
+        if bias == "BULLISH" and signal == "SELL":
+            log_info("SELL BLOCKED - AGAINST BULLISH BIAS")
+            return None
 
-        if confirm['adx'] > 25 and abs(ema_gap_pct) > 1:
-            regime = "TRENDING"
+        if bias == "BEARISH" and signal == "BUY":
+            log_info("BUY BLOCKED - AGAINST BEARISH BIAS")
+            return None
 
-        elif confirm['adx'] < 18 or abs(ema_gap_pct) < 0.3:
-            regime = "SIDEWAYS"
-
-        log_info(f"MARKET REGIME: {regime}")
-
-        # ======================
-        # BUY SCORE
-        # ======================
-        buy_score = 0
-
-        resistance_distance = ((resistance - price) / price) * 100
-
-        bullish_ema_rejection = all(
-            trend_df['low'].iloc[-i] > trend_df['ema50'].iloc[-i]
-            for i in range(1, 4)
+        # =========================================================
+        # AI FILTER (UNCHANGED ROLE)
+        # =========================================================
+        ai_score = ai_confidence_boost(
+            trend_df,
+            confirm_df,
+            entry_df,
+            signal,
+            btc_trend,
+            btc_corr,
+            rs
         )
 
-        if (
-            trend['ema50'] > trend['ema200'] and
-            bullish_ema_rejection and
-            trend['close'] > trend['ema50'] and
-            0.5 < ema_gap_pct < 8 and
-            resistance_distance > 2
-        ):
-            buy_score += 2
+        if ai_score < -5:
+            log_info(f"AI REJECTED SIGNAL | score={ai_score}")
+            return None
 
-        if confirm['macd'] > confirm['macd_signal']:
-            buy_score += 1
+        log_info(f"SMC SIGNAL CONFIRMED | bias={bias} AI={ai_score}")
 
-        if 52 < confirm['rsi'] < 72:
-            buy_score += 1
-
-        if confirm['adx'] > 20:
-            buy_score += 1
-
-        if entry['close'] > entry['ema20']:
-            buy_score += 1
-
-        if abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.01:
-            buy_score += 1
-
-        if entry['volume'] > entry['volume_sma'] * 1.1:
-            buy_score += 1
-
-        if entry['close'] > entry['open']:
-            buy_score += 1
-
-        if btc_corr >= 0.75:
-            if btc_trend == "BULLISH":
-                buy_score += 2
-            elif btc_trend == "BEARISH":
-                buy_score -= 2
-
-        if rs > 2:
-            buy_score += 2
-
-        if bullish_sweep:
-            buy_score += 2
-
-        if ob_type == "BULLISH" and ob_low <= price <= ob_high:
-            buy_score += 2
-
-        # ======================
-        # REVERSAL BUY
-        # ======================
-        recent_high = trend_df['high'].iloc[-20:-5].max()
-
-        if trend_df['close'].iloc[-1] > recent_high:
-            buy_score += 2
-
-        bullish_macd_cross = (
-            confirm_df['macd'].iloc[-3] <= confirm_df['macd_signal'].iloc[-3]
-            and confirm_df['macd'].iloc[-2] > confirm_df['macd_signal'].iloc[-2]
-        )
-
-        bullish_rsi_cross = (
-            confirm_df['rsi'].iloc[-3] < 50
-            and confirm_df['rsi'].iloc[-2] > 50
-        )
-
-        if bullish_macd_cross:
-            buy_score += 1
-
-        if bullish_rsi_cross:
-            buy_score += 1
-
-        # ======================
-        # REGIME ADJUSTMENT
-        # ======================
-        if regime == "TRENDING":
-            buy_score += 1
-        elif regime == "SIDEWAYS":
-            buy_score -= 3
-
-        # ======================
-        # SELL SCORE
-        # ======================
-        sell_score = 0
-
-        support_distance = ((price - support) / price) * 100
-
-        bearish_ema_rejection = all(
-            trend_df['high'].iloc[-i] < trend_df['ema50'].iloc[-i]
-            for i in range(1, 4)
-        )
-
-        if (
-            trend['ema50'] < trend['ema200'] and
-            bearish_ema_rejection and
-            trend['close'] < trend['ema50'] and
-            -8 < ema_gap_pct < -0.5 and
-            support_distance > 2
-        ):
-            sell_score += 2
-
-        if confirm['macd'] < confirm['macd_signal']:
-            sell_score += 1
-
-        if 28 < confirm['rsi'] < 48:
-            sell_score += 1
-
-        if confirm['adx'] > 20:
-            sell_score += 1
-
-        if entry['close'] < entry['ema20']:
-            sell_score += 1
-
-        if abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.01:
-            sell_score += 1
-
-        if entry['volume'] > entry['volume_sma'] * 1.1:
-            sell_score += 1
-
-        if entry['close'] < entry['open']:
-            sell_score += 1
-
-        if btc_corr >= 0.75:
-            if btc_trend == "BEARISH":
-                sell_score += 2
-            elif btc_trend == "BULLISH":
-                sell_score -= 2
-
-        if rs < -2:
-            sell_score += 2
-
-        if bearish_sweep:
-            sell_score += 2
-
-        if ob_type == "BEARISH" and ob_low <= price <= ob_high:
-            sell_score += 2
-
-        # ======================
-        # REVERSAL SELL
-        # ======================
-        recent_low = trend_df['low'].iloc[-20:-5].min()
-
-        if trend_df['close'].iloc[-1] < recent_low:
-            sell_score += 2
-
-        bearish_macd_cross = (
-            confirm_df['macd'].iloc[-3] >= confirm_df['macd_signal'].iloc[-3]
-            and confirm_df['macd'].iloc[-2] < confirm_df['macd_signal'].iloc[-2]
-        )
-
-        bearish_rsi_cross = (
-            confirm_df['rsi'].iloc[-3] > 50
-            and confirm_df['rsi'].iloc[-2] < 50
-        )
-
-        if bearish_macd_cross:
-            sell_score += 1
-
-        if bearish_rsi_cross:
-            sell_score += 1
-
-        # ======================
-        # REGIME ADJUSTMENT
-        # ======================
-        if regime == "TRENDING":
-            sell_score += 1
-        elif regime == "SIDEWAYS":
-            sell_score -= 3
-
-        # ======================
-        # FINAL SCORES
-        # ======================
-        buy_score = max(0, buy_score)
-        sell_score = max(0, sell_score)
-
-        buy_conf = score_to_confidence(buy_score)
-        sell_conf = score_to_confidence(sell_score)
-
-        log_info(f"BUY conf: {buy_conf}% | SELL conf: {sell_conf}%")
-
-        signal_guess = "BUY" if buy_conf > sell_conf else "SELL"
-
-        ai_boost = ai_confidence_boost(trend_df, confirm_df, entry_df, signal_guess)
-
-        if buy_conf > sell_conf:
-            buy_conf = min(100, max(0, buy_conf + ai_boost))
-        else:
-            sell_conf = min(100, max(0, sell_conf + ai_boost))
-
-        # ======================
-        # FINAL DECISION
-        # ======================
-        if buy_conf >= 80 and buy_conf > sell_conf:
-            log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
-            return "BUY"
-
-        if sell_conf >= 80 and sell_conf > buy_conf:
-            log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
-            return "SELL"
-
-        return None
+        return signal
 
     except Exception as e:
-        log_error(f"STRATEGY ERROR: {e}")
+        log_error(f"SMC ERROR: {e}")
         return None
