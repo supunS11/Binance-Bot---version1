@@ -307,20 +307,31 @@ def get_liquidity_take_profit(df, side):
         highs = df['high']
         lows = df['low']
 
-        if side == SIDE_BUY:
+        recent_high_10 = highs.rolling(10).max().iloc[-1]
+        recent_high_30 = highs.rolling(30).max().iloc[-1]
+        recent_high_50 = highs.rolling(50).max().iloc[-1]
 
-            # nearest swing highs (liquidity clusters)
-            level1 = highs.iloc[-10:].max()
-            level2 = highs.iloc[-25:].max()
+        recent_low_10 = lows.rolling(10).min().iloc[-1]
+        recent_low_30 = lows.rolling(30).min().iloc[-1]
+        recent_low_50 = lows.rolling(50).min().iloc[-1]
 
-            return min(level1, level2)
+        if side == "BUY":
+
+            tp = max(
+                recent_high_10,
+                recent_high_30,
+                recent_high_50
+            )
 
         else:
 
-            level1 = lows.iloc[-10:].min()
-            level2 = lows.iloc[-25:].min()
+            tp = min(
+                recent_low_10,
+                recent_low_30,
+                recent_low_50
+            )
 
-            return max(level1, level2)
+        return tp
 
     except Exception as e:
         log_error(f"LIQ TP ERROR: {e}")

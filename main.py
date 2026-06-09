@@ -241,10 +241,29 @@ def run_bot():
                     reward = abs(tp_price - entry_price)
 
                     if risk <= 0 or reward <= 0:
-                        log_warning(f"{symbol} INVALID RISK/REWARD")
                         continue
 
                     rr = reward / risk
+
+                    # =========================
+                    # RR FILTER
+                    # =========================
+                    if rr < config.MIN_RR:
+                        continue
+
+
+                    # =========================
+                    # TP LIQUIDITY QUALITY CHECK (ADD HERE)
+                    # =========================
+                    min_reward = abs(entry_price - sl_price) * 1.3  # increase buffer
+
+                    if reward < min_reward:
+                        log_warning(
+                            f"{symbol} TP TOO CLOSE (liquidity weak) | "
+                            f"Reward={reward:.6f} | "
+                            f"MinReq={min_reward:.6f}"
+                        )
+                        continue
 
                     log_info(
                         f"{symbol} RR={rr:.2f} | "

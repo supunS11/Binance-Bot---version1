@@ -19,6 +19,7 @@ MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
 MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MODE = os.getenv("MODE")
+MIN_RR = float(os.getenv("MIN_RR"))
 
 MARGIN_PER_TRADE = float(os.getenv("MARGIN_PER_TRADE", 6))
 
