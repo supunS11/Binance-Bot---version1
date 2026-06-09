@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-
+import numpy as np
 import config
 
 from binance.enums import *
@@ -22,7 +22,8 @@ from exchange import (
     get_relative_strength,
     get_structure_stop_loss,
     get_hybrid_take_profit,
-    get_structure_take_profit
+    get_structure_take_profit,
+    get_liquidity_take_profit
 )
 
 from indicators import apply_indicators
@@ -189,7 +190,11 @@ def run_bot():
                     # =========================
                     sl_price = get_structure_stop_loss(confirm_df, signal)
 
-                    if sl_price is None:
+                    # =========================
+                    # SL SAFETY CHECK (IMPORTANT FIX)
+                    # =========================
+                    if sl_price is None or np.isnan(sl_price):
+                        log_warning(f"{symbol} INVALID SL (None/NaN)")
                         continue
 
                     # =========================
@@ -206,28 +211,13 @@ def run_bot():
                     # =========================
                     # STRUCTURE TP
                     # =========================
-                    rr_tp = get_hybrid_take_profit(
-                        entry_price,
-                        sl_price,
-                        signal,
-                        rr_target=2.0
-                    )
-
-                    structure_tp = get_structure_take_profit(
+                    tp_price = get_liquidity_take_profit(
                         trend_df,
                         signal
                     )
 
-                    if rr_tp is None or structure_tp is None:
+                    if tp_price is None:
                         continue
-
-                    # =========================
-                    # HYBRID TP
-                    # =========================
-                    if signal == "BUY":
-                        tp_price = min(rr_tp, structure_tp)
-                    else:
-                        tp_price = max(rr_tp, structure_tp)
 
                     # =========================
                     # RR VALIDATION
@@ -243,11 +233,13 @@ def run_bot():
 
                     log_info(
                         f"{symbol} RR={rr:.2f} | "
+                        f"TP={tp_price:.4f} | "
+                        f"SL={sl_price:.4f} | "
                         f"Reward={reward:.4f} | "
                         f"Risk={risk:.4f}"
                     )
 
-                    MIN_RR = 1.5
+                    MIN_RR = 1.0
 
                     if rr < MIN_RR:
                         continue

@@ -169,63 +169,120 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         in_ob = ob_low is not None and ob_low <= price <= ob_high
 
         # =====================================================
-        # LIQUIDITY SWEEP
+        # LIQUIDITY SWEEP + REJECTION
         # =====================================================
-        sweep_low = confirm_df['low'].iloc[-3] < confirm_df['low'].iloc[-10:-3].min()
-        sweep_high = confirm_df['high'].iloc[-3] > confirm_df['high'].iloc[-10:-3].max()
+        prev_low = confirm_df['low'].iloc[-10:-3].min()
+        prev_high = confirm_df['high'].iloc[-10:-3].max()
+
+        sweep_low = (
+            confirm_df['low'].iloc[-3] < prev_low
+            and confirm_df['close'].iloc[-2] > prev_low
+        )
+
+        sweep_high = (
+            confirm_df['high'].iloc[-3] > prev_high
+            and confirm_df['close'].iloc[-2] < prev_high
+        )
 
         # =====================================================
-        # SCORE SYSTEM (REPLACED LOGIC)
+        # PRIORITY SCORE SYSTEM
         # =====================================================
+
         buy_score = 0
         sell_score = 0
 
-        # STRUCTURE
-        if structure["choch_up"] or structure["bos_up"]:
+        # 1. BOS
+        if structure["bos_up"]:
+            buy_score += 3
+
+        if structure["bos_down"]:
+            sell_score += 3
+
+        # 2. CHOCH
+        if structure["choch_up"]:
             buy_score += 2
 
-        if structure["choch_down"] or structure["bos_down"]:
+        if structure["choch_down"]:
             sell_score += 2
 
-        # LIQUIDITY
-        if eq_lows or sweep_low:
-            buy_score += 1
-
-        if eq_highs or sweep_high:
-            sell_score += 1
-
-        # RETEST
+        # 3. RETEST
         if retest_buy:
             buy_score += 2
 
         if retest_sell:
             sell_score += 2
 
-        # ORDER BLOCK
+        # 4. LIQUIDITY
+        if eq_lows or sweep_low:
+            buy_score += 2
+
+        if eq_highs or sweep_high:
+            sell_score += 2
+
+        # 5. ORDER BLOCK
         if ob_type == "BULLISH" and in_ob:
-            buy_score += 1
+            buy_score += 2
 
         if ob_type == "BEARISH" and in_ob:
-            sell_score += 1
+            sell_score += 2
 
-        # DISPLACEMENT (SOFT BOOST, NOT REQUIRED)
+        # 6. DISPLACEMENT
         if displacement:
             buy_score += 1
             sell_score += 1
+
+        # =====================================================
+        # EMA VALUE BONUS
+        # =====================================================
+
+        ema50 = confirm_df['ema50'].iloc[-1]
+
+        ema_distance = abs(price - ema50) / price * 100
+
+        if ema_distance < 1:
+            buy_score += 1
+            sell_score += 1
+
+        # =====================================================
+        # BTC ALIGNMENT BOOST
+        # =====================================================
+
+        if btc_corr is not None and btc_corr > 0.6:
+
+            if btc_trend == "BULLISH":
+                buy_score += 1
+
+            elif btc_trend == "BEARISH":
+                sell_score += 1
 
         # =====================================================
         # FINAL SIGNAL DECISION
         # =====================================================
         signal = None
 
-        if buy_score >= 3 and buy_score > sell_score:
+        buy_structure = (
+            structure["bos_up"]
+            or structure["choch_up"]
+        )
+
+        sell_structure = (
+            structure["bos_down"]
+            or structure["choch_down"]
+        )
+
+        if (
+            buy_score >= 3
+            and buy_structure
+            and buy_score > sell_score
+        ):
             signal = "BUY"
 
-        elif sell_score >= 3 and sell_score > buy_score:
+        elif (
+            sell_score >= 3
+            and sell_structure
+            and sell_score > buy_score
+        ):
             signal = "SELL"
-
-        if signal is None:
-            return None
 
         # =====================================================
         # ANTI-CHASE FILTER (UNCHANGED)
@@ -267,6 +324,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             return None
 
         log_info(f"SMC SIGNAL | {signal} | AI={ai_score}")
+
+        log_info(
+            f"SCORE | BUY={buy_score} | SELL={sell_score}"
+        )
 
         return signal
 

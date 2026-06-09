@@ -246,24 +246,20 @@ def place_market_order(symbol, side, quantity):
 def get_structure_stop_loss(df, side):
 
     try:
-
         atr = df['atr'].iloc[-1]
 
+        swing_low = df['low'].iloc[-10:].min()
+        swing_high = df['high'].iloc[-10:].max()
+
+        buffer = atr * 0.6
+
         if side == SIDE_BUY:
+            return swing_low - buffer
 
-            swing_low_5 = df['low'].iloc[-5:].min()
-            swing_low_10 = df['low'].iloc[-10:].min()
+        elif side == SIDE_SELL:
+            return swing_high + buffer
 
-            stop_loss = min(swing_low_5, swing_low_10) - (atr * 0.5)
-
-        else:
-
-            swing_high_5 = df['high'].iloc[-5:].max()
-            swing_high_10 = df['high'].iloc[-10:].max()
-
-            stop_loss = max(swing_high_5, swing_high_10) + (atr * 0.5)
-
-            return stop_loss
+        return None
 
     except Exception as e:
         log_error(f"SL error: {e}")
@@ -272,20 +268,16 @@ def get_structure_stop_loss(df, side):
 def get_hybrid_take_profit(entry_price, stop_loss, side, rr_target=2.0):
 
     try:
-
         risk = abs(entry_price - stop_loss)
-
         if risk <= 0:
             return None
 
-        tp_distance = risk * rr_target
+        rr_tp = risk * rr_target
 
         if side == SIDE_BUY:
-            tp = entry_price + tp_distance
+            return entry_price + rr_tp
         else:
-            tp = entry_price - tp_distance
-
-        return tp
+            return entry_price - rr_tp
 
     except Exception as e:
         log_error(f"TP error: {e}")
@@ -294,17 +286,51 @@ def get_hybrid_take_profit(entry_price, stop_loss, side, rr_target=2.0):
 def get_structure_take_profit(trend_df, side):
 
     try:
+        highs = trend_df['high'].iloc[-50:]
+        lows = trend_df['low'].iloc[-50:]
 
         if side == SIDE_BUY:
-            return trend_df['high'].iloc[-30:].max()
+            return highs.max()
 
         else:
-            return trend_df['low'].iloc[-30:].min()
+            return lows.min()
 
     except Exception as e:
         log_error(f"Structure TP error: {e}")
         return None
+    
+def get_liquidity_take_profit(df, side):
 
+    try:
+
+        if len(df) < 30:
+            return None
+
+        if side == "BUY":
+
+            liquidity_tp = (
+                df['high']
+                .rolling(5)
+                .max()
+                .iloc[-25:-2]
+                .max()
+            )
+
+        else:
+
+            liquidity_tp = (
+                df['low']
+                .rolling(5)
+                .min()
+                .iloc[-25:-2]
+                .min()
+            )
+
+        return float(liquidity_tp)
+
+    except Exception as e:
+        log_error(f"LIQ TP ERROR: {e}")
+        return None
 
 # =========================
 # TP/SL EXECUTION (CLEAN VERSION)
