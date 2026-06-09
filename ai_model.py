@@ -34,10 +34,10 @@ def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, 
         # RSI EXTREMES (IMPROVED SAFETY)
         # ======================
         if signal == "BUY" and confirm['rsi'] > 75:
-            boost -= 8
+            boost -= 3
 
         if signal == "SELL" and confirm['rsi'] < 25:
-            boost -= 8
+            boost -= 3
 
         # ======================
         # VOLUME CONFIRMATION
@@ -58,7 +58,7 @@ def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, 
         # ======================
         # BTC CONTEXT BOOST (NEW - IMPORTANT)
         # ======================
-        if btc_corr is not None and btc_corr >= 0.75:
+        if btc_corr is not None and btc_corr >= 0.5:
 
             if signal == "BUY" and btc_trend == "BULLISH":
                 boost += 4
@@ -67,10 +67,10 @@ def ai_confidence_boost(trend_df, confirm_df, entry_df, signal, btc_trend=None, 
                 boost += 4
 
             elif signal == "BUY" and btc_trend == "BEARISH":
-                boost -= 6
+                boost -= 3
 
             elif signal == "SELL" and btc_trend == "BULLISH":
-                boost -= 6
+                boost -= 3
 
         # ======================
         # RELATIVE STRENGTH (NEW FILTER)

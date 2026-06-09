@@ -19,11 +19,14 @@ from exchange import (
     get_unrealized_pnl,
     get_btc_trend,
     get_btc_correlation,
-    get_relative_strength
+    get_relative_strength,
+    get_structure_stop_loss,
+    get_hybrid_take_profit,
+    get_structure_take_profit
 )
 
 from indicators import apply_indicators
-from strategy import check_signal, get_structure_stop_loss
+from strategy import check_signal
 from risk_management import calculate_position_size
 from logger import log_info, log_warning, log_error
 
@@ -130,42 +133,43 @@ def run_bot():
                     log_info(f"{symbol} SIGNAL: {signal}")
 
                     # =========================
+                    # FINAL ENTRY QUALITY FILTER
+                    # =========================
+                    from filters import (
+                        entry_confirmation_5m,
+                        is_fresh_move
+                    )
+
+                    if not entry_confirmation_5m(entry_df, signal):
+                        log_warning(f"{symbol} BLOCKED | 5M ENTRY QUALITY FAIL")
+                        continue
+
+                    if not is_fresh_move(entry_df):
+                        log_warning(f"{symbol} BLOCKED | CHASING MOVE")
+                        continue
+
+                    # =========================
                     # POSITION LIMITS
                     # =========================
                     counts = get_open_position_counts()
 
                     if config.MAX_TOTAL_POSITIONS and counts['total'] >= config.MAX_TOTAL_POSITIONS:
-                        log_warning(
-                            f"🚨 MAX POSITIONS REACHED 🚨\n"
-                            f"TOTAL OPEN: {counts['total']}/{config.MAX_TOTAL_POSITIONS}\n"
-                            f"BUY: {counts['buy']} | SELL: {counts['sell']}\n"
-                            f"Skipping new entries..."
-    )
                         continue
 
                     if signal == "BUY" and config.MAX_BUY_POSITIONS and counts['buy'] >= config.MAX_BUY_POSITIONS:
-                        log_warning(
-                            f"🚨 MAX BUY POSITIONS REACHED | "
-                            f"BUY={counts['buy']}/{config.MAX_BUY_POSITIONS} | "
-                            f"TOTAL={counts['total']}"
-                        )
                         continue
 
                     if signal == "SELL" and config.MAX_SELL_POSITIONS and counts['sell'] >= config.MAX_SELL_POSITIONS:
-                        log_warning(
-                            f"🚨 MAX SELL POSITIONS REACHED | "
-                            f"SELL={counts['sell']}/{config.MAX_SELL_POSITIONS} | "
-                            f"TOTAL={counts['total']}"
-                        )
                         continue
 
                     # =========================
-                    # PRICE (PRE-ENTRY)
+                    # PRICE
                     # =========================
-                    current_price = entry_df['close'].iloc[-2]
+                    current_price = entry_df['close'].iloc[-1]
+                    entry_price = current_price
 
                     # =========================
-                    # STRUCTURE SL (PRE-RISK CHECK)
+                    # STRUCTURE SL
                     # =========================
                     sl_price = get_structure_stop_loss(confirm_df, signal)
 
@@ -173,21 +177,78 @@ def run_bot():
                         continue
 
                     # =========================
-                    # SL RISK VALIDATION (CRITICAL FIX)
+                    # SL DIRECTION VALIDATION (FIX)
                     # =========================
-                    risk_pct = abs(current_price - sl_price) / current_price
+                    if signal == "BUY" and sl_price >= entry_price:
+                        log_warning(f"{symbol} INVALID SL (BUY ABOVE ENTRY)")
+                        continue
+
+                    if signal == "SELL" and sl_price <= entry_price:
+                        log_warning(f"{symbol} INVALID SL (SELL BELOW ENTRY)")
+                        continue
+
+                    # =========================
+                    # STRUCTURE TP
+                    # =========================
+                    rr_tp = get_hybrid_take_profit(
+                        entry_price,
+                        sl_price,
+                        signal,
+                        rr_target=2.0
+                    )
+
+                    structure_tp = get_structure_take_profit(
+                        trend_df,
+                        signal
+                    )
+
+                    if rr_tp is None or structure_tp is None:
+                        continue
+
+                    # =========================
+                    # HYBRID TP
+                    # =========================
+                    if signal == "BUY":
+                        tp_price = min(rr_tp, structure_tp)
+                    else:
+                        tp_price = max(rr_tp, structure_tp)
+
+                    # =========================
+                    # RR VALIDATION
+                    # =========================
+                    risk = abs(entry_price - sl_price)
+                    reward = abs(tp_price - entry_price)
+
+                    if risk <= 0 or reward <= 0:
+                        log_warning(f"{symbol} INVALID RISK/REWARD")
+                        continue
+
+                    rr = reward / risk
+
+                    log_info(
+                        f"{symbol} RR={rr:.2f} | "
+                        f"Reward={reward:.4f} | "
+                        f"Risk={risk:.4f}"
+                    )
+
+                    MIN_RR = 1.5
+
+                    if rr < MIN_RR:
+                        continue
+
+                    # =========================
+                    # SL RISK VALIDATION (FIXED)
+                    # =========================
+                    risk_pct = abs(entry_price - sl_price) / entry_price
                     sl_roi = risk_pct * config.LEVERAGE * 100
 
                     log_info(f"{symbol} PRE-TRADE SL ROI: {sl_roi:.2f}%")
 
-                    MAX_SL_ROI = config.MAX_SL_ROI
-
-                    if sl_roi > MAX_SL_ROI:
-                        log_warning(f"{symbol} SKIP | SL TOO LARGE: {sl_roi:.2f}%")
+                    if sl_roi > config.MAX_SL_ROI:
                         continue
 
                     # =========================
-                    # POSITION SIZE (FIXED)
+                    # POSITION SIZE
                     # =========================
                     balance = get_balance()
 
@@ -199,17 +260,8 @@ def run_bot():
                         config.MARGIN_PER_TRADE
                     )
 
-                    notional = quantity * current_price
-
-                    log_info(
-                        f"{symbol} QTY={quantity} | NOTIONAL={notional:.2f}"
-                    )
-
                     if quantity <= 0:
-                        log_warning(f"{symbol} SKIPPED | INVALID QTY")
                         continue
-
-                    log_info(f"{symbol} QTY: {quantity}")
 
                     # =========================
                     # LEVERAGE
@@ -218,7 +270,7 @@ def run_bot():
                         continue
 
                     # =========================
-                    # PLACE ORDER
+                    # ORDER
                     # =========================
                     side = SIDE_BUY if signal == "BUY" else SIDE_SELL
 
@@ -229,43 +281,28 @@ def run_bot():
                     entry_price = get_entry_price(symbol)
 
                     # =========================
-                    # PLACE TP/SL
+                    # TP/SL PLACEMENT
                     # =========================
                     place_tp_sl(
                         symbol,
                         side,
                         entry_price,
                         quantity,
-                        confirm_df
+                        sl_price,
+                        tp_price
                     )
 
-                    # =========================
-                    # STORE TRADE
-                    # =========================
                     trade_times[symbol] = {
                         "entry_time": datetime.now(),
                         "side": signal
                     }
 
-                    # =========================
-                    # LOG SUMMARY
-                    # =========================
                     log_info(
                         f"*** {symbol} TRADE OPENED ***\n"
                         f"ENTRY: {entry_price}\n"
                         f"SL: {sl_price}\n"
-                        f"SL ROI: {sl_roi:.2f}%\n"
                         f"BALANCE: {balance}\n"
                     )
-
-                    orderCounts = get_open_position_counts()
-
-                    log_info(
-                        f"{symbol} OPENED | TOTAL={orderCounts['total']} | "
-                        f"BUY={orderCounts['buy']} | SELL={orderCounts['sell']}"
-                    )
-
-                    time.sleep(2)
 
                 except Exception as e:
                     log_error(f"{symbol} ERROR: {e}")

@@ -251,23 +251,65 @@ def get_structure_stop_loss(df, side):
 
         if side == SIDE_BUY:
 
-            swing_low = df['low'].iloc[-10:-1].min()
-            return swing_low - (atr * 0.5)
+            swing_low_5 = df['low'].iloc[-5:].min()
+            swing_low_10 = df['low'].iloc[-10:].min()
+
+            stop_loss = min(swing_low_5, swing_low_10) - (atr * 0.5)
 
         else:
 
-            swing_high = df['high'].iloc[-10:-1].max()
-            return swing_high + (atr * 0.5)
+            swing_high_5 = df['high'].iloc[-5:].max()
+            swing_high_10 = df['high'].iloc[-10:].max()
+
+            stop_loss = max(swing_high_5, swing_high_10) + (atr * 0.5)
+
+            return stop_loss
 
     except Exception as e:
         log_error(f"SL error: {e}")
+        return None
+    
+def get_hybrid_take_profit(entry_price, stop_loss, side, rr_target=2.0):
+
+    try:
+
+        risk = abs(entry_price - stop_loss)
+
+        if risk <= 0:
+            return None
+
+        tp_distance = risk * rr_target
+
+        if side == SIDE_BUY:
+            tp = entry_price + tp_distance
+        else:
+            tp = entry_price - tp_distance
+
+        return tp
+
+    except Exception as e:
+        log_error(f"TP error: {e}")
+        return None
+    
+def get_structure_take_profit(trend_df, side):
+
+    try:
+
+        if side == SIDE_BUY:
+            return trend_df['high'].iloc[-30:].max()
+
+        else:
+            return trend_df['low'].iloc[-30:].min()
+
+    except Exception as e:
+        log_error(f"Structure TP error: {e}")
         return None
 
 
 # =========================
 # TP/SL EXECUTION (CLEAN VERSION)
 # =========================
-def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
+def place_tp_sl(symbol, side, entry_price, quantity, sl_price, tp_price):
 
     try:
 
@@ -279,47 +321,75 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
             client.futures_mark_price(symbol=symbol)['markPrice']
         )
 
-        # ================= BUY =================
+        # =========================
+        # USE PRE-CALCULATED TP/SL
+        # =========================
+        tp_price = round(tp_price, precision)
+        sl_price = round(sl_price, precision)
+
         if side == SIDE_BUY:
-
-            tp_price = round(
-                entry_price * (1 + (config.ROI_PERCENT_TP / config.LEVERAGE) / 100),
-                precision
-            )
-
-            sl_price = round(
-                get_structure_stop_loss(confirm_df, SIDE_BUY),
-                precision
-            )
-
             close_side = SIDE_SELL
-
-        # ================= SELL =================
         else:
-
-            tp_price = round(
-                entry_price * (1 - (config.ROI_PERCENT_TP / config.LEVERAGE) / 100),
-                precision
-            )
-
-            sl_price = round(
-                get_structure_stop_loss(confirm_df, SIDE_SELL),
-                precision
-            )
-
             close_side = SIDE_BUY
 
-        # ================= VALIDATION ONLY =================
+        # =========================
+        # VALIDATION
+        # =========================
         if side == SIDE_BUY:
-            if tp_price <= market_price or sl_price >= market_price:
+
+            if tp_price <= market_price:
+                log_warning(f"{symbol} INVALID BUY TP")
                 return
+
+            if sl_price >= market_price:
+                log_warning(f"{symbol} INVALID BUY SL")
+                return
+
         else:
-            if tp_price >= market_price or sl_price <= market_price:
+
+            if tp_price >= market_price:
+                log_warning(f"{symbol} INVALID SELL TP")
+                return
+
+            if sl_price <= market_price:
+                log_warning(f"{symbol} INVALID SELL SL")
                 return
 
         log_info(
-            f"{symbol}\nENTRY: {entry_price}\nTP: {tp_price}\nSL: {sl_price}"
+            f"{symbol}\n"
+            f"ENTRY: {entry_price}\n"
+            f"TP: {tp_price}\n"
+            f"SL: {sl_price}"
         )
+
+        # TAKE PROFIT
+        client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=tp_price,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            priceProtect=True
+        )
+
+        time.sleep(2)
+
+        # STOP LOSS
+        client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type="STOP_MARKET",
+            stopPrice=sl_price,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            priceProtect=True
+        )
+
+        log_info(f"{symbol} TP/SL CREATED")
+
+    except Exception as e:
+        log_error(f"{symbol} TP/SL error: {e}")
 
         # TAKE PROFIT
         client.futures_create_order(
@@ -442,3 +512,4 @@ def validate_min_notional(symbol, quantity, price):
 
     except Exception:
         return False, 0
+    

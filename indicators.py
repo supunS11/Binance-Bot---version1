@@ -89,3 +89,23 @@ def apply_indicators(df):
     except Exception as e:
         print(f"INDICATORS ERROR: {e}")
         return None
+    
+def calculate_atr(candles, period=14):
+    if not candles or len(candles) < period + 1:
+        return 0  # safety fallback
+
+    tr_values = []
+
+    for i in range(1, len(candles)):
+        high = candles[i]['high']
+        low = candles[i]['low']
+        prev_close = candles[i - 1]['close']
+
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
+        tr_values.append(tr)
+
+    return sum(tr_values[-period:]) / period
