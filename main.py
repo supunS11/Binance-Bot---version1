@@ -23,7 +23,8 @@ from exchange import (
     get_structure_stop_loss,
     get_hybrid_take_profit,
     get_structure_take_profit,
-    get_liquidity_take_profit
+    get_liquidity_take_profit,
+    get_price_precision
 )
 
 from indicators import apply_indicators
@@ -234,12 +235,18 @@ def run_bot():
                     #     )
                     #     continue
 
-                    tp_roi = config.TP_ROI_PERCENT / 100
+                    precision = get_price_precision(symbol)
 
                     if signal == "BUY":
-                        tp_price = entry_price * (1 + tp_roi)
+                        tp_price = round(
+                        entry_price * (1 + (config.TP_ROI_PERCENT / config.LEVERAGE) / 100),
+                        precision
+                    )
                     else:
-                        tp_price = entry_price * (1 - tp_roi)
+                        tp_price = round(
+                        entry_price * (1 - (config.TP_ROI_PERCENT / config.LEVERAGE) / 100),
+                        precision
+                    )
 
                     if signal == "BUY" and tp_price <= entry_price:
                         log_warning(f"{symbol} INVALID BUY TP")
