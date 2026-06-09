@@ -216,74 +216,89 @@ def run_bot():
                     # =========================
                     # STRUCTURE TP
                     # =========================
-                    tp_price = get_liquidity_take_profit(
-                        trend_df,
-                        signal
-                    )
+                    # tp_price = get_liquidity_take_profit(
+                    #     trend_df,
+                    #     signal
+                    # )
 
-                    if tp_price is None or np.isnan(tp_price):
-                        log_warning(f"{symbol} INVALID TP (liquidity missing)")
+                    # if tp_price is None or np.isnan(tp_price):
+                    #     log_warning(f"{symbol} INVALID TP (liquidity missing)")
+                    #     continue
+
+                    # min_reward = abs(entry_price - sl_price) * 1.2
+                    # reward = abs(tp_price - entry_price)
+
+                    # if reward < min_reward:
+                    #     log_warning(
+                    #         f"{symbol} TP TOO CLOSE (weak liquidity) | Reward={reward:.6f}"
+                    #     )
+                    #     continue
+
+                    tp_roi = config.TP_ROI_PERCENT / 100
+
+                    if signal == "BUY":
+                        tp_price = entry_price * (1 + tp_roi)
+                    else:
+                        tp_price = entry_price * (1 - tp_roi)
+
+                    if signal == "BUY" and tp_price <= entry_price:
+                        log_warning(f"{symbol} INVALID BUY TP")
                         continue
 
-                    min_reward = abs(entry_price - sl_price) * 1.2
-                    reward = abs(tp_price - entry_price)
-
-                    if reward < min_reward:
-                        log_warning(
-                            f"{symbol} TP TOO CLOSE (weak liquidity) | Reward={reward:.6f}"
-                        )
+                    if signal == "SELL" and tp_price >= entry_price:
+                        log_warning(f"{symbol} INVALID SELL TP")
                         continue
 
                     # =========================
                     # RR VALIDATION
                     # =========================
-                    risk = abs(entry_price - sl_price)
-                    reward = abs(tp_price - entry_price)
+                    # risk = abs(entry_price - sl_price)
+                    # reward = abs(tp_price - entry_price)
 
-                    if risk <= 0 or reward <= 0:
-                        continue
+                    # if risk <= 0 or reward <= 0:
+                    #     continue
 
-                    rr = reward / risk
+                    # rr = reward / risk
 
-                    # =========================
-                    # RR FILTER
-                    # =========================
-                    if rr < config.MIN_RR:
-                        continue
+                    # # =========================
+                    # # RR FILTER
+                    # # =========================
+                    # if rr < config.MIN_RR:
+                    #     continue
 
 
                     # =========================
                     # TP LIQUIDITY QUALITY CHECK (ADD HERE)
                     # =========================
-                    min_reward = abs(entry_price - sl_price) * 1.3  # increase buffer
+                    # min_reward = abs(entry_price - sl_price) * 1.3  # increase buffer
 
-                    if reward < min_reward:
-                        log_warning(
-                            f"{symbol} TP TOO CLOSE (liquidity weak) | "
-                            f"Reward={reward:.6f} | "
-                            f"MinReq={min_reward:.6f}"
-                        )
-                        continue
+                    # if reward < min_reward:
+                    #     log_warning(
+                    #         f"{symbol} TP TOO CLOSE (liquidity weak) | "
+                    #         f"Reward={reward:.6f} | "
+                    #         f"MinReq={min_reward:.6f}"
+                    #     )
+                    #     continue
 
-                    log_info(
-                        f"{symbol} RR={rr:.2f} | "
-                        f"TP={tp_price:.4f} | "
-                        f"SL={sl_price:.4f} | "
-                        f"Reward={reward:.4f} | "
-                        f"Risk={risk:.4f}"
-                    )
+                    # log_info(
+                    #     f"{symbol} RR={rr:.2f} | "
+                    #     f"TP={tp_price:.4f} | "
+                    #     f"SL={sl_price:.4f} | "
+                    #     f"Reward={reward:.4f} | "
+                    #     f"Risk={risk:.4f}"
+                    # )
 
-                    MIN_RR_REJECT = 0.8
+                    # MIN_RR_REJECT = 0.8
 
-                    # OPTIONAL: ensure signal_score exists
-                    if 'signal_score' not in locals():
-                        signal_score = buy_score if signal == "BUY" else sell_score
+                    # # OPTIONAL: ensure signal_score exists
+                    # if 'signal_score' not in locals():
+                    #     signal_score = buy_score if signal == "BUY" else sell_score
 
-                    if rr < MIN_RR_REJECT or signal_score < 6:
-                        log_warning(
-                            f"{symbol} REJECTED TRADE | RR={rr:.2f} | SCORE={signal_score}"
-                        )
-                        continue
+                    # if rr < MIN_RR_REJECT or signal_score < 6:
+                    #     log_warning(
+                    #         f"{symbol} REJECTED TRADE | RR={rr:.2f} | SCORE={signal_score}"
+                    #     )
+                    #     continue
 
                     # =========================
                     # SL RISK VALIDATION (FIXED)

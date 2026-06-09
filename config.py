@@ -14,7 +14,7 @@ ENTRY_TIMEFRAME = os.getenv("ENTRY_TIMEFRAME")
 
 LEVERAGE = int(os.getenv("LEVERAGE"))
 
-ROI_PERCENT_TP = float(os.getenv("ROI_PERCENT_TP"))
+TP_ROI_PERCENT = float(os.getenv("TP_ROI_PERCENT"))
 MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
 MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
