@@ -59,3 +59,42 @@ def is_fresh_move(df):
         return abs(df['close'].iloc[-1] - df['close'].iloc[-5]) < df['atr'].iloc[-1] * 1.5
     except:
         return False
+    
+def get_entry_filter_mode(trend_tf):
+
+    if trend_tf == "1h" or trend_tf == "1H":
+        return "MOMENTUM_ONLY"
+
+    if trend_tf == "30m" or trend_tf == "30M":
+        return "STRICT_ENTRY"
+
+    return "MOMENTUM_ONLY"
+
+def entry_momentum_only(df):
+
+    try:
+        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+        atr = df['atr'].iloc[-1]
+
+        return body > atr * 0.15
+
+    except:
+        return False
+    
+def entry_strict_filter(df, signal):
+
+    try:
+        body = abs(df['close'].iloc[-1] - df['open'].iloc[-1])
+        atr = df['atr'].iloc[-1]
+
+        momentum_ok = body > atr * 0.20
+
+        if signal == "BUY":
+            trend_ok = df['close'].iloc[-1] > df['ema50'].iloc[-1]
+        else:
+            trend_ok = df['close'].iloc[-1] < df['ema50'].iloc[-1]
+
+        return momentum_ok and trend_ok
+
+    except:
+        return False

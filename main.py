@@ -143,17 +143,24 @@ def run_bot():
                     # FINAL ENTRY QUALITY FILTER
                     # =========================
                     from filters import (
-                        entry_confirmation_5m,
-                        is_fresh_move
+                        get_entry_filter_mode,
+                        entry_momentum_only,
+                        entry_strict_filter
                     )
 
-                    if not entry_confirmation_5m(entry_df, signal):
-                        log_warning(f"{symbol} BLOCKED | 5M ENTRY QUALITY FAIL")
-                        continue
+                    mode = get_entry_filter_mode(config.TREND_TIMEFRAME)
 
-                    if not is_fresh_move(entry_df):
-                        log_warning(f"{symbol} BLOCKED | CHASING MOVE")
-                        continue
+                    if mode == "MOMENTUM_ONLY":
+
+                        if not entry_momentum_only(entry_df):
+                            log_warning(f"{symbol} BLOCKED | MOMENTUM FAIL (1H MODE)")
+                            continue
+
+                    elif mode == "STRICT_ENTRY":
+
+                        if not entry_strict_filter(entry_df, signal):
+                            log_warning(f"{symbol} BLOCKED | STRICT ENTRY FAIL (30M MODE)")
+                            continue
 
                     # =========================
                     # POSITION LIMITS

@@ -35,6 +35,7 @@ def get_market_bias(trend_df):
 def detect_structure(df):
 
     try:
+
         atr = df['atr'].iloc[-1]
 
         swing_high = df['high'].rolling(10).max().iloc[-6]
@@ -46,24 +47,49 @@ def detect_structure(df):
         last_close = df['close'].iloc[-1]
         last_open = df['open'].iloc[-1]
 
+        # =========================
+        # VOLUME CONFIRMATION
+        # =========================
+        current_volume = df['volume'].iloc[-1]
+        avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+
+        volume_confirmed = current_volume > (avg_volume * 1.2)
+
+        # =========================
+        # STRONG BREAKOUT CANDLE
+        # =========================
+        candle_body = abs(last_close - last_open)
+
+        strong_break = candle_body > (atr * 0.4)
+
+        # =========================
+        # BOS
+        # =========================
         bos_up = (
             last_close > swing_high + (atr * 0.10)
             and last_close > last_open
+            and volume_confirmed
+            and strong_break
         )
 
         bos_down = (
             last_close < swing_low - (atr * 0.10)
             and last_close < last_open
+            and volume_confirmed
+            and strong_break
         )
 
+        # =========================
+        # CHOCH
+        # =========================
         choch_up = (
-            df['low'].iloc[-2] < swing_low and
-            df['close'].iloc[-1] > swing_low
+            df['low'].iloc[-2] < swing_low
+            and last_close > swing_low
         )
 
         choch_down = (
-            df['high'].iloc[-2] > swing_high and
-            df['close'].iloc[-1] < swing_high
+            df['high'].iloc[-2] > swing_high
+            and last_close < swing_high
         )
 
         return {
@@ -79,7 +105,15 @@ def detect_structure(df):
 
     except Exception as e:
         log_error(f"STRUCTURE ERROR: {e}")
-        return {"bos_up": False, "bos_down": False, "hh": False, "ll": False}
+
+        return {
+            "bos_up": False,
+            "bos_down": False,
+            "hh": False,
+            "ll": False,
+            "choch_up": False,
+            "choch_down": False
+        }
 
 def detect_retest(entry_df, structure):
 
@@ -283,14 +317,14 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         )
 
         if (
-            buy_score >= 6
+            buy_score >= 5
             and buy_structure
             and buy_score > sell_score
         ):
             signal = "BUY"
 
         elif (
-            sell_score >= 6
+            sell_score >= 5
             and sell_structure
             and sell_score > buy_score
         ):
