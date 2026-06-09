@@ -329,7 +329,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             f"SCORE | BUY={buy_score} | SELL={sell_score}"
         )
 
-        return signal
+        return signal, buy_score, sell_score
 
     except Exception as e:
         log_error(f"SMC ERROR: {e}")

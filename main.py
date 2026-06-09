@@ -113,7 +113,7 @@ def run_bot():
                     # =========================
                     # SIGNAL
                     # =========================
-                    signal = check_signal(
+                    result = check_signal(
                         trend_df,
                         confirm_df,
                         entry_df,
@@ -121,6 +121,11 @@ def run_bot():
                         btc_corr,
                         rs
                     )
+
+                    if result is None:
+                        continue
+
+                    signal, buy_score, sell_score = result
 
                     if not signal:
                         log_warning(
@@ -216,7 +221,17 @@ def run_bot():
                         signal
                     )
 
-                    if tp_price is None:
+                    if tp_price is None or np.isnan(tp_price):
+                        log_warning(f"{symbol} INVALID TP (liquidity missing)")
+                        continue
+
+                    min_reward = abs(entry_price - sl_price) * 1.2
+                    reward = abs(tp_price - entry_price)
+
+                    if reward < min_reward:
+                        log_warning(
+                            f"{symbol} TP TOO CLOSE (weak liquidity) | Reward={reward:.6f}"
+                        )
                         continue
 
                     # =========================
@@ -239,9 +254,16 @@ def run_bot():
                         f"Risk={risk:.4f}"
                     )
 
-                    MIN_RR = 1.0
+                    MIN_RR_REJECT = 0.8
 
-                    if rr < MIN_RR:
+                    # OPTIONAL: ensure signal_score exists
+                    if 'signal_score' not in locals():
+                        signal_score = buy_score if signal == "BUY" else sell_score
+
+                    if rr < MIN_RR_REJECT or signal_score < 6:
+                        log_warning(
+                            f"{symbol} REJECTED TRADE | RR={rr:.2f} | SCORE={signal_score}"
+                        )
                         continue
 
                     # =========================
@@ -253,6 +275,10 @@ def run_bot():
                     log_info(f"{symbol} PRE-TRADE SL ROI: {sl_roi:.2f}%")
 
                     if sl_roi > config.MAX_SL_ROI:
+                        log_warning(
+                            f"{symbol} BLOCKED | SL ROI TOO HIGH | "
+                            f"SL ROI={sl_roi:.2f}% | MAX={config.MAX_SL_ROI}% | "
+                        )
                         continue
 
                     # =========================
@@ -310,6 +336,13 @@ def run_bot():
                         f"ENTRY: {entry_price}\n"
                         f"SL: {sl_price}\n"
                         f"BALANCE: {balance}\n"
+                    )
+
+                    counts = get_open_position_counts()
+
+                    log_info(
+                        f"📊 POSITION STATUS UPDATE\n"
+                        f"TOTAL: {counts['total']} | BUY: {counts['buy']} | SELL: {counts['sell']}"
                     )
 
                 except Exception as e:

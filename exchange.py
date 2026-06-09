@@ -248,18 +248,20 @@ def get_structure_stop_loss(df, side):
     try:
         atr = df['atr'].iloc[-1]
 
-        swing_low = df['low'].iloc[-10:].min()
-        swing_high = df['high'].iloc[-10:].max()
-
-        buffer = atr * 0.6
-
         if side == SIDE_BUY:
-            return swing_low - buffer
 
-        elif side == SIDE_SELL:
-            return swing_high + buffer
+            swing_low = df['low'].iloc[-15:].min()
 
-        return None
+            # avoid overly deep SL
+            sl = swing_low - (atr * 0.3)
+
+        else:
+
+            swing_high = df['high'].iloc[-15:].max()
+
+            sl = swing_high + (atr * 0.3)
+
+        return sl
 
     except Exception as e:
         log_error(f"SL error: {e}")
@@ -302,31 +304,23 @@ def get_structure_take_profit(trend_df, side):
 def get_liquidity_take_profit(df, side):
 
     try:
+        highs = df['high']
+        lows = df['low']
 
-        if len(df) < 30:
-            return None
+        if side == SIDE_BUY:
 
-        if side == "BUY":
+            # nearest swing highs (liquidity clusters)
+            level1 = highs.iloc[-10:].max()
+            level2 = highs.iloc[-25:].max()
 
-            liquidity_tp = (
-                df['high']
-                .rolling(5)
-                .max()
-                .iloc[-25:-2]
-                .max()
-            )
+            return min(level1, level2)
 
         else:
 
-            liquidity_tp = (
-                df['low']
-                .rolling(5)
-                .min()
-                .iloc[-25:-2]
-                .min()
-            )
+            level1 = lows.iloc[-10:].min()
+            level2 = lows.iloc[-25:].min()
 
-        return float(liquidity_tp)
+            return max(level1, level2)
 
     except Exception as e:
         log_error(f"LIQ TP ERROR: {e}")
