@@ -1,4 +1,4 @@
-from logger import log_info, log_error
+from logger import log_info, log_error, log_warning
 from ai_model import ai_confidence_boost
 from indicators import calculate_atr
 from filters import (
@@ -35,14 +35,26 @@ def get_market_bias(trend_df):
 def detect_structure(df):
 
     try:
+        atr = df['atr'].iloc[-1]
+
         swing_high = df['high'].rolling(10).max().iloc[-6]
         swing_low = df['low'].rolling(10).min().iloc[-6]
 
-        hh = df['high'].iloc[-2] > swing_high
-        ll = df['low'].iloc[-2] < swing_low
+        hh = df['close'].iloc[-2] > swing_high
+        ll = df['close'].iloc[-2] < swing_low
 
-        bos_up = df['close'].iloc[-1] > swing_high
-        bos_down = df['close'].iloc[-1] < swing_low
+        last_close = df['close'].iloc[-1]
+        last_open = df['open'].iloc[-1]
+
+        bos_up = (
+            last_close > swing_high + (atr * 0.10)
+            and last_close > last_open
+        )
+
+        bos_down = (
+            last_close < swing_low - (atr * 0.10)
+            and last_close < last_open
+        )
 
         choch_up = (
             df['low'].iloc[-2] < swing_low and
@@ -271,14 +283,14 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         )
 
         if (
-            buy_score >= 3
+            buy_score >= 6
             and buy_structure
             and buy_score > sell_score
         ):
             signal = "BUY"
 
         elif (
-            sell_score >= 3
+            sell_score >= 6
             and sell_structure
             and sell_score > buy_score
         ):
@@ -299,11 +311,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             return None
 
         if signal == "BUY" and distance_to_high < atr * 0.8:
-            log_info("BUY BLOCKED - CHASING RESISTANCE")
+            log_warning("BUY BLOCKED - CHASING RESISTANCE")
             return None
 
         if signal == "SELL" and distance_to_low < atr * 0.8:
-            log_info("SELL BLOCKED - CHASING SUPPORT")
+            log_warning("SELL BLOCKED - CHASING SUPPORT")
             return None
 
         # =====================================================
