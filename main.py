@@ -154,12 +154,28 @@ def run_bot():
                     counts = get_open_position_counts()
 
                     if config.MAX_TOTAL_POSITIONS and counts['total'] >= config.MAX_TOTAL_POSITIONS:
+                        log_warning(
+                            f"🚨 MAX POSITIONS REACHED 🚨\n"
+                            f"TOTAL OPEN: {counts['total']}/{config.MAX_TOTAL_POSITIONS}\n"
+                            f"BUY: {counts['buy']} | SELL: {counts['sell']}\n"
+                            f"Skipping new entries..."
+    )
                         continue
 
                     if signal == "BUY" and config.MAX_BUY_POSITIONS and counts['buy'] >= config.MAX_BUY_POSITIONS:
+                        log_warning(
+                            f"🚨 MAX BUY POSITIONS REACHED | "
+                            f"BUY={counts['buy']}/{config.MAX_BUY_POSITIONS} | "
+                            f"TOTAL={counts['total']}"
+                        )
                         continue
 
                     if signal == "SELL" and config.MAX_SELL_POSITIONS and counts['sell'] >= config.MAX_SELL_POSITIONS:
+                        log_warning(
+                            f"🚨 MAX SELL POSITIONS REACHED | "
+                            f"SELL={counts['sell']}/{config.MAX_SELL_POSITIONS} | "
+                            f"TOTAL={counts['total']}"
+                        )
                         continue
 
                     # =========================
