@@ -252,12 +252,12 @@ def get_structure_stop_loss(df, side):
         if side == SIDE_BUY:
 
             swing_low = df['low'].iloc[-10:-1].min()
-            return swing_low - (atr * 0.5)
+            return swing_low - (atr * 0.8)
 
         else:
 
             swing_high = df['high'].iloc[-10:-1].max()
-            return swing_high + (atr * 0.5)
+            return swing_high + (atr * 0.8)
 
     except Exception as e:
         log_error(f"SL error: {e}")
