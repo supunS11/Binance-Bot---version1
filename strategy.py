@@ -371,11 +371,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         # ======================
         # FINAL DECISION
         # ======================
-        if buy_conf >= 80 and buy_conf > sell_conf:
+        if buy_conf >= 70 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
             return "BUY"
 
-        if sell_conf >= 80 and sell_conf > buy_conf:
+        if sell_conf >= 70 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
             return "SELL"
 

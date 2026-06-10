@@ -309,6 +309,8 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
 
             close_side = SIDE_BUY
 
+            time.sleep(1)
+
         # ================= VALIDATION ONLY =================
         if side == SIDE_BUY:
             if tp_price <= market_price or sl_price >= market_price:
@@ -346,6 +348,8 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
         )
 
         log_info(f"{symbol} TP/SL CREATED")
+
+        time.sleep(1)
 
     except Exception as e:
         log_error(f"{symbol} TP/SL error: {e}")
