@@ -1,3 +1,4 @@
+import config
 from logger import log_info, log_error
 from ai_model import ai_confidence_boost
 
@@ -156,14 +157,29 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             for i in range(1, 4)
         )
 
-        if (
-            trend['ema50'] > trend['ema200'] and
-            bullish_ema_rejection and
-            trend['close'] > trend['ema50'] and
-            0.5 < ema_gap_pct < 8 and
-            resistance_distance > 2
-        ):
+        required_distance = (
+            config.ROI_PERCENT_TP /
+            config.LEVERAGE
+        ) + 0.7
+
+        # 1. TREND ALIGNMENT (CORE FILTER)
+        if trend['ema50'] > trend['ema200']:
             buy_score += 2
+
+        # 2. BULLISH EMA REJECTION
+        if bullish_ema_rejection:
+            buy_score += 1
+
+        # 3. PRICE ABOVE EMA50
+        if trend['close'] > trend['ema50']:
+            buy_score += 1
+
+        # 4. EMA GAP STRENGTH (UPTREND QUALITY)
+        if 0.5 < ema_gap_pct < 15:
+            buy_score += 1
+        
+        if  resistance_distance < required_distance :
+            return None
 
         if confirm['macd'] > confirm['macd_signal']:
             buy_score += 1
@@ -231,7 +247,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if regime == "TRENDING":
             buy_score += 1
         elif regime == "SIDEWAYS":
-            buy_score -= 3
+            return None
 
         # ======================
         # SELL SCORE
@@ -245,14 +261,24 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             for i in range(1, 4)
         )
 
-        if (
-            trend['ema50'] < trend['ema200'] and
-            bearish_ema_rejection and
-            trend['close'] < trend['ema50'] and
-            -8 < ema_gap_pct < -0.5 and
-            support_distance > 2
-        ):
+        # Trend alignment (most important)
+        if trend['ema50'] < trend['ema200']:
             sell_score += 2
+
+        # EMA rejection
+        if bearish_ema_rejection:
+            sell_score += 1
+
+        # Price below EMA50
+        if trend['close'] < trend['ema50']:
+            sell_score += 1
+
+        # Trend strength
+        if -15 < ema_gap_pct < -0.5:
+            sell_score += 1
+
+        if support_distance < required_distance:
+            return None
 
         if confirm['macd'] < confirm['macd_signal']:
             sell_score += 1
@@ -320,7 +346,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if regime == "TRENDING":
             sell_score += 1
         elif regime == "SIDEWAYS":
-            sell_score -= 3
+            return None
 
         # ======================
         # FINAL SCORES
