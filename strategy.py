@@ -19,17 +19,25 @@ def score_to_confidence(score, max_score=24):
 def get_structure_stop_loss(df, side):
 
     try:
-        atr = df['atr'].iloc[-1]
+        atr = df['atr'].iloc[-2]
 
         if side == "BUY":
 
-            swing_low = df['low'].iloc[-10:-1].min()
-            return swing_low - (atr * 0.5)
+            swing_low_10 = df['low'].iloc[-10:-1].min()
+            swing_low_20 = df['low'].iloc[-20:-1].min()
+
+            swing_low = min(swing_low_10, swing_low_20)
+
+            return swing_low - (atr * 0.8)
 
         else:
 
-            swing_high = df['high'].iloc[-10:-1].max()
-            return swing_high + (atr * 0.5)
+            swing_high_10 = df['high'].iloc[-10:-1].max()
+            swing_high_20 = df['high'].iloc[-20:-1].max()
+
+            swing_high = max(swing_high_10, swing_high_20)
+
+            return swing_high + (atr * 0.8)
 
     except Exception as e:
         log_error(f"STRUCTURE SL ERROR: {e}")
