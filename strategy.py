@@ -1,6 +1,7 @@
 import config
 from logger import log_info, log_error
 from ai_model import ai_confidence_boost
+from exchange import get_support_resistance
 
 
 def score_to_confidence(score, max_score=20):
@@ -112,8 +113,12 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         confirm = confirm_df.iloc[-2]
         entry = entry_df.iloc[-2]
 
-        support = trend_df['low'].rolling(50).min().iloc[-1]
-        resistance = trend_df['high'].rolling(50).max().iloc[-1]
+        support, resistance = get_support_resistance(trend_df)
+
+        if support is None or resistance is None:
+            log_info("INVALID SUPPORT/RESISTANCE")
+            return None
+        
         price = trend_df['close'].iloc[-1]
 
         bullish_sweep, bearish_sweep = detect_liquidity_sweep(confirm_df)
@@ -160,7 +165,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         ) * 100
 
         if resistance_distance < required_distance:
-            return None
+            log_info(
+                f"BUY BLOCKED | Resistance too close: "
+                f"{round(resistance_distance,2)}%"
+            )
+            buy_score -= 2
 
         bullish_ema_rejection = all(
             trend_df['low'].iloc[-i] > trend_df['ema50'].iloc[-i]
@@ -245,7 +254,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         ) * 100
 
         if support_distance < required_distance:
-            return None
+            log_info(
+                f"SELL BLOCKED | Support too close: "
+                f"{round(support_distance,2)}%"
+            )
+            sell_score -= 2
 
         bearish_ema_rejection = all(
             trend_df['high'].iloc[-i] < trend_df['ema50'].iloc[-i]
