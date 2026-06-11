@@ -262,6 +262,25 @@ def get_structure_stop_loss(df, side):
     except Exception as e:
         log_error(f"SL error: {e}")
         return None
+    
+def get_structure_take_profit(df, side):
+
+    try:
+        atr = df['atr'].iloc[-1]
+
+        if side == "BUY":
+
+            swing_high = df['high'].iloc[-10:-1].max()
+            return swing_high + (atr * 0.5)
+
+        else:
+
+            swing_low = df['low'].iloc[-10:-1].min()
+            return swing_low - (atr * 0.5)
+
+    except Exception as e:
+        log_error(f"TP error: {e}")
+        return None
 
 
 # =========================
@@ -374,7 +393,12 @@ def get_btc_correlation(symbol):
         coin_ret = coin_df['close'].pct_change().dropna()
         btc_ret = btc_df['close'].pct_change().dropna()
 
-        return round(float(np.corrcoef(coin_ret, btc_ret)[0, 1]), 2)
+        corr = np.corrcoef(coin_ret, btc_ret)[0, 1]
+
+        if np.isnan(corr):
+            return 0
+
+        return round(float(corr), 2)
 
     except Exception as e:
         log_error(f"{symbol} corr error: {e}")
@@ -393,9 +417,10 @@ def get_btc_trend():
 
         btc = btc_df.iloc[-2]
 
-        if btc['ema50'] > btc['ema200']:
+        if btc['close'] > btc['ema50']:
             return "BULLISH"
-        elif btc['ema50'] < btc['ema200']:
+
+        elif btc['close'] < btc['ema50']:
             return "BEARISH"
 
         return "NEUTRAL"
@@ -421,8 +446,15 @@ def get_relative_strength(symbol):
         if coin is None or btc is None:
             return 0
 
-        coin_r = (coin['close'].iloc[-1] - coin['close'].iloc[-10]) / coin['close'].iloc[-10] * 100
-        btc_r = (btc['close'].iloc[-1] - btc['close'].iloc[-10]) / btc['close'].iloc[-10] * 100
+        coin_r = (
+            (coin['close'].iloc[-1] - coin['close'].iloc[-10])
+            / coin['close'].iloc[-10]
+        ) * 100
+
+        btc_r = (
+            (btc['close'].iloc[-1] - btc['close'].iloc[-10])
+            / btc['close'].iloc[-10]
+        ) * 100
 
         return round(coin_r - btc_r, 2)
 
@@ -446,3 +478,48 @@ def validate_min_notional(symbol, quantity, price):
 
     except Exception:
         return False, 0
+    
+import numpy as np
+
+def get_support_resistance(df, lookback=50):
+
+    try:
+
+        if df is None or len(df) < lookback:
+            return None, None
+
+        df = df.iloc[-lookback:]
+
+        highs = df['high']
+        lows = df['low']
+
+        resistance_levels = []
+        support_levels = []
+
+        # Pivot detection (cleaner)
+        for i in range(3, len(df) - 3):
+
+            if highs.iloc[i] == max(highs.iloc[i-3:i+4]):
+                resistance_levels.append(highs.iloc[i])
+
+            if lows.iloc[i] == min(lows.iloc[i-3:i+4]):
+                support_levels.append(lows.iloc[i])
+
+        if not resistance_levels or not support_levels:
+            return None, None
+
+        price = df['close'].iloc[-1]
+
+        # Closest resistance ABOVE price
+        resistance_levels = [r for r in resistance_levels if r > price]
+        resistance = min(resistance_levels) if resistance_levels else max(df['high'])
+
+        # Closest support BELOW price
+        support_levels = [s for s in support_levels if s < price]
+        support = max(support_levels) if support_levels else min(df['low'])
+
+        return support, resistance
+
+    except Exception as e:
+        log_error(f"SR ERROR: {e}")
+        return None, None

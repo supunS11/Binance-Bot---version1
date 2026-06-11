@@ -78,6 +78,7 @@ def run_bot():
                     trend_df = get_klines(symbol, config.TREND_TIMEFRAME)
                     confirm_df = get_klines(symbol, config.CONFIRMATION_TIMEFRAME)
                     entry_df = get_klines(symbol, config.ENTRY_TIMEFRAME)
+                    sl_df = get_klines(symbol, config.SL_TIMEFRAME)
 
                     if trend_df is None or confirm_df is None or entry_df is None:
                         continue
@@ -91,6 +92,7 @@ def run_bot():
                     trend_df = apply_indicators(trend_df)
                     confirm_df = apply_indicators(confirm_df)
                     entry_df = apply_indicators(entry_df)
+                    sl_df = apply_indicators(sl_df)
 
                     if trend_df is None or confirm_df is None or entry_df is None:
                         continue

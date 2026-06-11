@@ -3,7 +3,7 @@ from logger import log_info, log_error
 from ai_model import ai_confidence_boost
 
 
-def score_to_confidence(score, max_score=24):
+def score_to_confidence(score, max_score=20):
 
     if score <= 0:
         return 0
@@ -124,232 +124,204 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         log_info(f"ATR%: {round(atr_pct, 2)}")
 
         # ======================
-        # ATR FILTER
+        # ATR FILTER (slightly relaxed)
         # ======================
-        if atr_pct < 0.2 or atr_pct > 3.0:
+        if atr_pct < 0.15 or atr_pct > 3.2:
             log_info(f"ATR FILTER BLOCKED | ATR%: {round(atr_pct, 2)}")
             return None
 
-        ema_gap_pct = ((trend['ema50'] - trend['ema200']) / trend['ema200']) * 100
-
         # ======================
-        # REGIME
+        # REGIME (less strict)
         # ======================
         regime = "NORMAL"
 
-        if confirm['adx'] > 25 and abs(ema_gap_pct) > 1:
+        if confirm['adx'] > 25:
             regime = "TRENDING"
-
-        elif confirm['adx'] < 18 or abs(ema_gap_pct) < 0.3:
+        elif confirm['adx'] < 15:
             regime = "SIDEWAYS"
 
         log_info(f"MARKET REGIME: {regime}")
 
-        # ======================
-        # BUY SCORE
-        # ======================
-        buy_score = 0
-
-        resistance_distance = ((resistance - price) / price) * 100
-
-        bullish_ema_rejection = all(
-            trend_df['low'].iloc[-i] > trend_df['ema50'].iloc[-i]
-            for i in range(1, 4)
-        )
+        if regime == "SIDEWAYS":
+            return None
 
         required_distance = (
             config.ROI_PERCENT_TP /
             config.LEVERAGE
         ) + 0.7
 
-        # 1. TREND ALIGNMENT (CORE FILTER)
-        if trend['ema50'] > trend['ema200']:
+        # ======================
+        # BUY SCORE
+        # ======================
+        buy_score = 0
+
+        resistance_distance = (
+            (resistance - price) / price
+        ) * 100
+
+        if resistance_distance < required_distance:
+            return None
+
+        bullish_ema_rejection = all(
+            trend_df['low'].iloc[-i] > trend_df['ema50'].iloc[-i]
+            for i in range(1, 3)   # relaxed 4 → 3 candles
+        )
+
+        buy_pullback_zone = (
+            abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.004
+        )
+
+        # Trend (core)
+        if trend['close'] > trend['ema50']:
             buy_score += 2
 
-        # 2. BULLISH EMA REJECTION
         if bullish_ema_rejection:
             buy_score += 1
 
-        # 3. PRICE ABOVE EMA50
-        if trend['close'] > trend['ema50']:
-            buy_score += 1
-
-        # 4. EMA GAP STRENGTH (UPTREND QUALITY)
-        if 0.5 < ema_gap_pct < 15:
-            buy_score += 1
-        
-        if  resistance_distance < required_distance :
-            return None
-
+        # Momentum (soft)
         if confirm['macd'] > confirm['macd_signal']:
             buy_score += 1
 
-        if 52 < confirm['rsi'] < 72:
+        if confirm['rsi'] > 48:   # relaxed
             buy_score += 1
 
-        if confirm['adx'] > 20:
+        if confirm['adx'] > 18:   # relaxed
             buy_score += 1
 
-        if entry['close'] > entry['ema20']:
-            buy_score += 1
+        # Entry trigger (broader)
+        if buy_pullback_zone:
+            buy_score += 2
 
-        if abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.01:
-            buy_score += 1
-
-        if entry['volume'] > entry['volume_sma'] * 1.1:
+        # Volume (soft)
+        if entry['volume'] > entry['volume_sma'] * 1.05:
             buy_score += 1
 
         if entry['close'] > entry['open']:
             buy_score += 1
 
+        # BTC influence (SOFT now)
         if btc_corr >= 0.75:
-            if btc_trend == "BULLISH":
-                buy_score += 2
-            elif btc_trend == "BEARISH":
-                buy_score -= 2
 
+            if btc_trend == "BULLISH":
+                buy_score += 1
+            elif btc_trend == "BEARISH":
+                buy_score -= 1
+
+        # Relative strength
         if rs > 2:
             buy_score += 2
 
+        # Liquidity / OB (bonus only)
         if bullish_sweep:
-            buy_score += 2
+            buy_score += 1
 
         if ob_type == "BULLISH" and ob_low <= price <= ob_high:
-            buy_score += 2
+            buy_score += 1
 
-        # ======================
-        # REVERSAL BUY
-        # ======================
+        # Breakout
         recent_high = trend_df['high'].iloc[-20:-5].max()
 
         if trend_df['close'].iloc[-1] > recent_high:
             buy_score += 2
-
-        bullish_macd_cross = (
-            confirm_df['macd'].iloc[-3] <= confirm_df['macd_signal'].iloc[-3]
-            and confirm_df['macd'].iloc[-2] > confirm_df['macd_signal'].iloc[-2]
-        )
 
         bullish_rsi_cross = (
             confirm_df['rsi'].iloc[-3] < 50
             and confirm_df['rsi'].iloc[-2] > 50
         )
 
-        if bullish_macd_cross:
-            buy_score += 1
-
         if bullish_rsi_cross:
             buy_score += 1
 
-        # ======================
-        # REGIME ADJUSTMENT
-        # ======================
         if regime == "TRENDING":
             buy_score += 1
-        elif regime == "SIDEWAYS":
-            return None
 
         # ======================
         # SELL SCORE
         # ======================
         sell_score = 0
 
-        support_distance = ((price - support) / price) * 100
-
-        bearish_ema_rejection = all(
-            trend_df['high'].iloc[-i] < trend_df['ema50'].iloc[-i]
-            for i in range(1, 4)
-        )
-
-        # Trend alignment (most important)
-        if trend['ema50'] < trend['ema200']:
-            sell_score += 2
-
-        # EMA rejection
-        if bearish_ema_rejection:
-            sell_score += 1
-
-        # Price below EMA50
-        if trend['close'] < trend['ema50']:
-            sell_score += 1
-
-        # Trend strength
-        if -15 < ema_gap_pct < -0.5:
-            sell_score += 1
+        support_distance = (
+            (price - support) / price
+        ) * 100
 
         if support_distance < required_distance:
             return None
 
+        bearish_ema_rejection = all(
+            trend_df['high'].iloc[-i] < trend_df['ema50'].iloc[-i]
+            for i in range(1, 3)
+        )
+
+        sell_pullback_zone = (
+            abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.004
+        )
+
+        # Trend
+        if trend['close'] < trend['ema50']:
+            sell_score += 2
+
+        if bearish_ema_rejection:
+            sell_score += 1
+
+        # Momentum
         if confirm['macd'] < confirm['macd_signal']:
             sell_score += 1
 
-        if 28 < confirm['rsi'] < 48:
+        if confirm['rsi'] < 52:
             sell_score += 1
 
-        if confirm['adx'] > 20:
+        if confirm['adx'] > 18:
             sell_score += 1
 
-        if entry['close'] < entry['ema20']:
-            sell_score += 1
+        # Entry trigger
+        if sell_pullback_zone:
+            sell_score += 2
 
-        if abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.01:
-            sell_score += 1
-
-        if entry['volume'] > entry['volume_sma'] * 1.1:
+        # Volume
+        if entry['volume'] > entry['volume_sma'] * 1.05:
             sell_score += 1
 
         if entry['close'] < entry['open']:
             sell_score += 1
 
+        # BTC influence (SOFT)
         if btc_corr >= 0.75:
-            if btc_trend == "BEARISH":
-                sell_score += 2
-            elif btc_trend == "BULLISH":
-                sell_score -= 2
 
+            if btc_trend == "BEARISH":
+                sell_score += 1
+            elif btc_trend == "BULLISH":
+                sell_score -= 1
+
+        # Relative strength
         if rs < -2:
             sell_score += 2
 
+        # Liquidity / OB
         if bearish_sweep:
-            sell_score += 2
+            sell_score += 1
 
         if ob_type == "BEARISH" and ob_low <= price <= ob_high:
-            sell_score += 2
+            sell_score += 1
 
-        # ======================
-        # REVERSAL SELL
-        # ======================
+        # Breakdown
         recent_low = trend_df['low'].iloc[-20:-5].min()
 
         if trend_df['close'].iloc[-1] < recent_low:
             sell_score += 2
-
-        bearish_macd_cross = (
-            confirm_df['macd'].iloc[-3] >= confirm_df['macd_signal'].iloc[-3]
-            and confirm_df['macd'].iloc[-2] < confirm_df['macd_signal'].iloc[-2]
-        )
 
         bearish_rsi_cross = (
             confirm_df['rsi'].iloc[-3] > 50
             and confirm_df['rsi'].iloc[-2] < 50
         )
 
-        if bearish_macd_cross:
-            sell_score += 1
-
         if bearish_rsi_cross:
             sell_score += 1
 
-        # ======================
-        # REGIME ADJUSTMENT
-        # ======================
         if regime == "TRENDING":
             sell_score += 1
-        elif regime == "SIDEWAYS":
-            return None
 
         # ======================
-        # FINAL SCORES
+        # FINAL
         # ======================
         buy_score = max(0, buy_score)
         sell_score = max(0, sell_score)
@@ -361,21 +333,23 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
         signal_guess = "BUY" if buy_conf > sell_conf else "SELL"
 
-        ai_boost = ai_confidence_boost(trend_df, confirm_df, entry_df, signal_guess)
+        ai_boost = ai_confidence_boost(
+            trend_df,
+            confirm_df,
+            entry_df,
+            signal_guess
+        )
 
         if buy_conf > sell_conf:
             buy_conf = min(100, max(0, buy_conf + ai_boost))
         else:
             sell_conf = min(100, max(0, sell_conf + ai_boost))
 
-        # ======================
-        # FINAL DECISION
-        # ======================
-        if buy_conf >= 70 and buy_conf > sell_conf:
+        if buy_conf >= 68 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
             return "BUY"
 
-        if sell_conf >= 70 and sell_conf > buy_conf:
+        if sell_conf >= 68 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
             return "SELL"
 
