@@ -211,12 +211,24 @@ def get_price_precision(symbol):
 # =========================
 def get_entry_price(symbol):
 
-    time.sleep(2)
+    try:
+        time.sleep(2)
 
-    positions = client.futures_position_information(symbol=symbol)
+        positions = client.futures_position_information(symbol=symbol)
 
-    return abs(float(positions[0]['entryPrice']))
+        if not positions:
+            return None
 
+        entry = float(positions[0].get('entryPrice', 0))
+
+        if entry <= 0:
+            return None
+
+        return abs(entry)
+
+    except Exception as e:
+        log_error(f"{symbol} entry price error: {e}")
+        return None
 
 # =========================
 # MARKET ORDER
@@ -266,27 +278,70 @@ def get_structure_stop_loss(df, side):
 def get_structure_take_profit(df, side):
 
     try:
+
         atr = df['atr'].iloc[-1]
 
         if side == "BUY":
 
-            swing_high = df['high'].iloc[-10:-1].max()
+            swing_high_10 = df['high'].iloc[-10:-1].max()
+            swing_high_20 = df['high'].iloc[-20:-1].max()
+
+            swing_high = max(
+                swing_high_10,
+                swing_high_20
+            )
+
             return swing_high + (atr * 0.5)
 
         else:
 
-            swing_low = df['low'].iloc[-10:-1].min()
+            swing_low_10 = df['low'].iloc[-10:-1].min()
+            swing_low_20 = df['low'].iloc[-20:-1].min()
+
+            swing_low = min(
+                swing_low_10,
+                swing_low_20
+            )
+
             return swing_low - (atr * 0.5)
 
     except Exception as e:
-        log_error(f"TP error: {e}")
+        log_error(f"TP ERROR: {e}")
+        return None
+    
+def get_hybrid_take_profit(df, side, sl_price, rr=1.5):
+
+    try:
+
+        price = df['close'].iloc[-1]
+
+        if side == "BUY":
+
+            risk = price - sl_price
+
+            if risk <= 0:
+                return None
+
+            return price + (risk * rr)
+
+        else:
+
+            risk = sl_price - price
+
+            if risk <= 0:
+                return None
+
+            return price - (risk * rr)
+
+    except Exception as e:
+        log_error(f"HYBRID TP ERROR: {e}")
         return None
 
 
 # =========================
 # TP/SL EXECUTION (CLEAN VERSION)
 # =========================
-def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
+def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_price):
 
     try:
 
@@ -301,30 +356,16 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df):
         # ================= BUY =================
         if side == SIDE_BUY:
 
-            tp_price = round(
-                entry_price * (1 + (config.ROI_PERCENT_TP / config.LEVERAGE) / 100),
-                precision
-            )
-
-            sl_price = round(
-                get_structure_stop_loss(confirm_df, SIDE_BUY),
-                precision
-            )
+            tp_price = round(tp_price, precision)
+            sl_price = round(sl_price, precision)
 
             close_side = SIDE_SELL
 
         # ================= SELL =================
         else:
 
-            tp_price = round(
-                entry_price * (1 - (config.ROI_PERCENT_TP / config.LEVERAGE) / 100),
-                precision
-            )
-
-            sl_price = round(
-                get_structure_stop_loss(confirm_df, SIDE_SELL),
-                precision
-            )
+            tp_price = round(tp_price, precision)
+            sl_price = round(sl_price, precision)
 
             close_side = SIDE_BUY
 
@@ -465,11 +506,9 @@ def get_relative_strength(symbol):
 def validate_min_notional(symbol, quantity, price):
 
     try:
-
         notional = quantity * price
 
-        # Binance futures minimum notional (safe default buffer)
-        MIN_NOTIONAL = 5.0
+        MIN_NOTIONAL = 20  # Binance futures requirement (most coins)
 
         if notional < MIN_NOTIONAL:
             return False, notional

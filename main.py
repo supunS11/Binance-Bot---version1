@@ -19,7 +19,9 @@ from exchange import (
     get_unrealized_pnl,
     get_btc_trend,
     get_btc_correlation,
-    get_relative_strength
+    get_relative_strength,
+    get_hybrid_take_profit,
+    validate_min_notional
 )
 
 from indicators import apply_indicators
@@ -169,10 +171,17 @@ def run_bot():
                     # =========================
                     # STRUCTURE SL (PRE-RISK CHECK)
                     # =========================
-                    sl_price = get_structure_stop_loss(confirm_df, signal)
+                    sl_price = get_structure_stop_loss(
+                        entry_df,
+                        signal
+                    )
 
-                    if sl_price is None:
-                        continue
+                    tp_price = get_hybrid_take_profit(
+                        entry_df,
+                        signal,
+                        sl_price,
+                        rr=1.5
+                    )
 
                     # =========================
                     # SL RISK VALIDATION (CRITICAL FIX)
@@ -219,6 +228,16 @@ def run_bot():
                     if not setup_leverage(symbol):
                         continue
 
+                    notional_ok, notional = validate_min_notional(
+                        symbol,
+                        quantity,
+                        current_price
+                    )
+
+                    if not notional_ok:
+                        log_warning(f"{symbol} SKIP | NOTIONAL TOO LOW: {notional}")
+                        continue
+
                     # =========================
                     # PLACE ORDER
                     # =========================
@@ -230,6 +249,10 @@ def run_bot():
 
                     entry_price = get_entry_price(symbol)
 
+                    if not entry_price:
+                        log_warning(f"{symbol} ENTRY PRICE NOT FOUND")
+                        continue
+
                     # =========================
                     # PLACE TP/SL
                     # =========================
@@ -238,7 +261,9 @@ def run_bot():
                         side,
                         entry_price,
                         quantity,
-                        confirm_df
+                        confirm_df,
+                        tp_price,
+                        sl_price
                     )
 
                     # =========================

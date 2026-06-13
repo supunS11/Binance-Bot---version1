@@ -1,10 +1,10 @@
 import config
-from logger import log_info, log_error
+from logger import log_info, log_error, log_warning
 from ai_model import ai_confidence_boost
 from exchange import get_support_resistance
 
 
-def score_to_confidence(score, max_score=20):
+def score_to_confidence(score, max_score=22):
 
     if score <= 0:
         return 0
@@ -114,6 +114,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         entry = entry_df.iloc[-2]
 
         support, resistance = get_support_resistance(trend_df)
+        ema_gap_pct = abs(entry['ema20'] - entry['ema50']) / entry['ema50'] * 100
 
         if support is None or resistance is None:
             log_info("INVALID SUPPORT/RESISTANCE")
@@ -159,6 +160,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         # BUY SCORE
         # ======================
         buy_score = 0
+
+        if ema_gap_pct < 0.2 or ema_gap_pct > 4.5:
+            log_warning(f"INVALID EMA GAP: {round(ema_gap_pct, 2)}%")
+            return None
 
         resistance_distance = (
             (resistance - price) / price
@@ -248,6 +253,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         # SELL SCORE
         # ======================
         sell_score = 0
+
+        if ema_gap_pct < 0.2 or ema_gap_pct > 4.5:
+            log_warning(f"INVALID EMA GAP: {round(ema_gap_pct, 2)}%")
+            return None
 
         support_distance = (
             (price - support) / price

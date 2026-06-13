@@ -14,8 +14,6 @@ def apply_indicators(df):
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
 
-        # EMA200 REMOVED (no longer used in strategy)
-
         # =========================
         # RSI
         # =========================
