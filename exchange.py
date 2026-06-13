@@ -253,22 +253,30 @@ def place_market_order(symbol, side, quantity):
 
 
 # =========================
-# STRUCTURE SL (REQUIRED BY MAIN + STRATEGY)
+# STRUCTURE SL (ALIGNED WITH STRATEGY)
 # =========================
 def get_structure_stop_loss(df, side):
 
     try:
 
-        atr = df['atr'].iloc[-1]
+        atr = df['atr'].iloc[-2]
 
-        if side == SIDE_BUY:
+        if side == SIDE_BUY or side == "BUY":
 
-            swing_low = df['low'].iloc[-10:-1].min()
+            swing_low_10 = df['low'].iloc[-10:-1].min()
+            swing_low_20 = df['low'].iloc[-20:-1].min()
+
+            swing_low = min(swing_low_10, swing_low_20)
+
             return swing_low - (atr * 0.8)
 
         else:
 
-            swing_high = df['high'].iloc[-10:-1].max()
+            swing_high_10 = df['high'].iloc[-10:-1].max()
+            swing_high_20 = df['high'].iloc[-20:-1].max()
+
+            swing_high = max(swing_high_10, swing_high_20)
+
             return swing_high + (atr * 0.8)
 
     except Exception as e:
@@ -279,7 +287,7 @@ def get_structure_take_profit(df, side):
 
     try:
 
-        atr = df['atr'].iloc[-1]
+        atr = df['atr'].iloc[-2]
 
         if side == "BUY":
 
@@ -313,7 +321,7 @@ def get_hybrid_take_profit(df, side, sl_price, rr=1.5):
 
     try:
 
-        price = df['close'].iloc[-1]
+        price = df['close'].iloc[-2]
 
         if side == "BUY":
 
@@ -332,6 +340,61 @@ def get_hybrid_take_profit(df, side, sl_price, rr=1.5):
                 return None
 
             return price - (risk * rr)
+
+    except Exception as e:
+        log_error(f"HYBRID TP ERROR: {e}")
+        return None
+    
+def calculate_rr_take_profit(entry_price, sl_price, side, rr=1.5):
+
+    try:
+
+        if side == "BUY":
+
+            risk = entry_price - sl_price
+
+            if risk <= 0:
+                return None
+
+            return entry_price + (risk * rr)
+
+        else:
+
+            risk = sl_price - entry_price
+
+            if risk <= 0:
+                return None
+
+            return entry_price - (risk * rr)
+
+    except Exception:
+        return None
+
+
+def get_structure_aware_take_profit(df, side, sl_price, rr=1.5):
+
+    try:
+
+        price = df['close'].iloc[-2]
+        rr_tp = get_hybrid_take_profit(df, side, sl_price, rr)
+        support, resistance = get_support_resistance(df)
+
+        if rr_tp is None:
+            return None
+
+        if side == "BUY":
+
+            if resistance is None or resistance <= price:
+                return rr_tp
+
+            return min(rr_tp, resistance)
+
+        else:
+
+            if support is None or support >= price:
+                return rr_tp
+
+            return max(rr_tp, support)
 
     except Exception as e:
         log_error(f"HYBRID TP ERROR: {e}")
@@ -518,7 +581,6 @@ def validate_min_notional(symbol, quantity, price):
     except Exception:
         return False, 0
     
-import numpy as np
 
 def get_support_resistance(df, lookback=50):
 

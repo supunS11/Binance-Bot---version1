@@ -20,7 +20,7 @@ from exchange import (
     get_btc_trend,
     get_btc_correlation,
     get_relative_strength,
-    get_hybrid_take_profit,
+    calculate_rr_take_profit,
     validate_min_notional
 )
 
@@ -82,10 +82,10 @@ def run_bot():
                     entry_df = get_klines(symbol, config.ENTRY_TIMEFRAME)
                     sl_df = get_klines(symbol, config.SL_TIMEFRAME)
 
-                    if trend_df is None or confirm_df is None or entry_df is None:
+                    if trend_df is None or confirm_df is None or entry_df is None or sl_df is None:
                         continue
 
-                    if len(trend_df) < 250 or len(confirm_df) < 250 or len(entry_df) < 250:
+                    if len(trend_df) < 250 or len(confirm_df) < 250 or len(entry_df) < 250 or len(sl_df) < 250:
                         continue
 
                     # =========================
@@ -96,7 +96,7 @@ def run_bot():
                     entry_df = apply_indicators(entry_df)
                     sl_df = apply_indicators(sl_df)
 
-                    if trend_df is None or confirm_df is None or entry_df is None:
+                    if trend_df is None or confirm_df is None or entry_df is None or sl_df is None:
                         continue
 
                     # =========================
@@ -144,7 +144,7 @@ def run_bot():
                             f"TOTAL OPEN: {counts['total']}/{config.MAX_TOTAL_POSITIONS}\n"
                             f"BUY: {counts['buy']} | SELL: {counts['sell']}\n"
                             f"Skipping new entries..."
-    )
+                        )
                         continue
 
                     if signal == "BUY" and config.MAX_BUY_POSITIONS and counts['buy'] >= config.MAX_BUY_POSITIONS:
@@ -172,16 +172,21 @@ def run_bot():
                     # STRUCTURE SL (PRE-RISK CHECK)
                     # =========================
                     sl_price = get_structure_stop_loss(
-                        entry_df,
+                        sl_df,
                         signal
                     )
 
-                    tp_price = get_hybrid_take_profit(
-                        entry_df,
-                        signal,
-                        sl_price,
-                        rr=1.5
-                    )
+                    if sl_price is None:
+                        log_warning(f"{symbol} SKIP | INVALID SL")
+                        continue
+
+                    if signal == "BUY" and sl_price >= current_price:
+                        log_warning(f"{symbol} SKIP | INVALID SL")
+                        continue
+
+                    if signal == "SELL" and sl_price <= current_price:
+                        log_warning(f"{symbol} SKIP | INVALID SL")
+                        continue
 
                     # =========================
                     # SL RISK VALIDATION (CRITICAL FIX)
@@ -243,7 +248,10 @@ def run_bot():
                     # =========================
                     side = SIDE_BUY if signal == "BUY" else SIDE_SELL
 
-                    place_market_order(symbol, side, quantity)
+                    order = place_market_order(symbol, side, quantity)
+
+                    if not order:
+                        continue
 
                     time.sleep(2)
 
@@ -251,6 +259,32 @@ def run_bot():
 
                     if not entry_price:
                         log_warning(f"{symbol} ENTRY PRICE NOT FOUND")
+                        continue
+
+                    tp_price = calculate_rr_take_profit(
+                        entry_price,
+                        sl_price,
+                        signal,
+                        rr=1.5
+                    )
+
+                    if tp_price is None:
+                        log_warning(f"{symbol} INVALID TP/SL")
+                        continue
+
+                    risk = abs(entry_price - sl_price)
+                    reward = abs(tp_price - entry_price)
+
+                    if risk <= 0:
+                        log_warning(f"{symbol} INVALID RISK")
+                        continue
+
+                    rr = reward / risk
+
+                    log_info(f"{symbol} RR: {rr:.2f}")
+
+                    if rr < 1.2:
+                        log_warning(f"{symbol} RR TOO LOW: {rr:.2f}")
                         continue
 
                     # =========================

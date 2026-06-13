@@ -4,13 +4,12 @@ from ai_model import ai_confidence_boost
 from exchange import get_support_resistance
 
 
-def score_to_confidence(score, max_score=22):
+def score_to_confidence(score, max_score=19):
 
     if score <= 0:
         return 0
 
     confidence = (score / max_score) * 100
-    confidence = confidence ** 1.15
 
     return round(min(confidence, 100), 2)
 
@@ -103,13 +102,13 @@ def detect_order_block(df):
 
 
 # =========================================================
-# MAIN SIGNAL ENGINE (UNCHANGED LOGIC)
+# MAIN SIGNAL ENGINE (UPDATED INTEGRATION + CONFIRMATIONS)
 # =========================================================
 def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
     try:
 
-        trend = trend_df.iloc[-2]
+        trend = trend_df.iloc[-3]
         confirm = confirm_df.iloc[-2]
         entry = entry_df.iloc[-2]
 
@@ -151,10 +150,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if regime == "SIDEWAYS":
             return None
 
-        required_distance = (
-            config.ROI_PERCENT_TP /
-            config.LEVERAGE
-        ) + 0.7
+        # required_distance = (
+        #     config.ROI_PERCENT_TP /
+        #     config.LEVERAGE
+        # ) + 0.7
 
         # ======================
         # BUY SCORE
@@ -165,16 +164,16 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             log_warning(f"INVALID EMA GAP: {round(ema_gap_pct, 2)}%")
             return None
 
-        resistance_distance = (
-            (resistance - price) / price
-        ) * 100
+        # resistance_distance = (
+        #     (resistance - price) / price
+        # ) * 100
 
-        if resistance_distance < required_distance:
-            log_info(
-                f"BUY BLOCKED | Resistance too close: "
-                f"{round(resistance_distance,2)}%"
-            )
-            buy_score -= 2
+        # if resistance_distance < required_distance:
+        #     log_info(
+        #         f"BUY BLOCKED | Resistance too close: "
+        #         f"{round(resistance_distance,2)}%"
+        #     )
+        #     buy_score -= 2
 
         bullish_ema_rejection = all(
             trend_df['low'].iloc[-i] > trend_df['ema50'].iloc[-i]
@@ -182,11 +181,17 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         )
 
         buy_pullback_zone = (
-            abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.004
+            entry['low'] <= entry['ema20']
+            and entry['close'] > entry['ema20']
+        )
+
+        buy_trend_ok = (
+            trend['ema20'] > trend['ema50']
+            and trend['close'] > trend['ema50']
         )
 
         # Trend (core)
-        if trend['close'] > trend['ema50']:
+        if buy_trend_ok:
             buy_score += 2
 
         if bullish_ema_rejection:
@@ -196,7 +201,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if confirm['macd'] > confirm['macd_signal']:
             buy_score += 1
 
-        if confirm['rsi'] > 48:   # relaxed
+        if confirm['rsi'] > 52:
             buy_score += 1
 
         if confirm['adx'] > 18:   # relaxed
@@ -225,9 +230,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if rs > 2:
             buy_score += 2
 
-        # Liquidity / OB (bonus only)
+        # Liquidity / OB
         if bullish_sweep:
             buy_score += 1
+        else:
+            buy_score -= 2
 
         if ob_type == "BULLISH" and ob_low <= price <= ob_high:
             buy_score += 1
@@ -258,16 +265,16 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             log_warning(f"INVALID EMA GAP: {round(ema_gap_pct, 2)}%")
             return None
 
-        support_distance = (
-            (price - support) / price
-        ) * 100
+        # support_distance = (
+        #     (price - support) / price
+        # ) * 100
 
-        if support_distance < required_distance:
-            log_info(
-                f"SELL BLOCKED | Support too close: "
-                f"{round(support_distance,2)}%"
-            )
-            sell_score -= 2
+        # if support_distance < required_distance:
+        #     log_info(
+        #         f"SELL BLOCKED | Support too close: "
+        #         f"{round(support_distance,2)}%"
+        #     )
+        #     sell_score -= 2
 
         bearish_ema_rejection = all(
             trend_df['high'].iloc[-i] < trend_df['ema50'].iloc[-i]
@@ -275,11 +282,17 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         )
 
         sell_pullback_zone = (
-            abs(entry['close'] - entry['ema20']) / entry['ema20'] < 0.004
+            entry['high'] >= entry['ema20']
+            and entry['close'] < entry['ema20']
+        )
+
+        sell_trend_ok = (
+            trend['ema20'] < trend['ema50']
+            and trend['close'] < trend['ema50']
         )
 
         # Trend
-        if trend['close'] < trend['ema50']:
+        if sell_trend_ok:
             sell_score += 2
 
         if bearish_ema_rejection:
@@ -289,7 +302,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if confirm['macd'] < confirm['macd_signal']:
             sell_score += 1
 
-        if confirm['rsi'] < 52:
+        if confirm['rsi'] < 48:
             sell_score += 1
 
         if confirm['adx'] > 18:
@@ -321,6 +334,8 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         # Liquidity / OB
         if bearish_sweep:
             sell_score += 1
+        else:
+            sell_score -= 2
 
         if ob_type == "BEARISH" and ob_low <= price <= ob_high:
             sell_score += 1
@@ -359,7 +374,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             trend_df,
             confirm_df,
             entry_df,
-            signal_guess
+            signal_guess,
+            btc_trend,
+            btc_corr,
+            rs
         )
 
         if buy_conf > sell_conf:
@@ -367,11 +385,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         else:
             sell_conf = min(100, max(0, sell_conf + ai_boost))
 
-        if buy_conf >= 68 and buy_conf > sell_conf:
+        if buy_conf >= 70 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
             return "BUY"
 
-        if sell_conf >= 68 and sell_conf > buy_conf:
+        if sell_conf >= 70 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
             return "SELL"
 
