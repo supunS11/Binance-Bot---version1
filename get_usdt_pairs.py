@@ -18,7 +18,6 @@ for s in exchange_info['symbols']:
         symbols.append(s['symbol'])
 
 # PRINT AS SINGLE LINE
-print(",".join(symbols))
-
+print(",".join(map(str.strip, symbols)))
 # TOTAL COUNT
 print(f"\nTOTAL COINS: {len(symbols)}")

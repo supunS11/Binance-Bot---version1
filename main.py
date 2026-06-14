@@ -265,7 +265,7 @@ def run_bot():
                         entry_price,
                         sl_price,
                         signal,
-                        rr=1.5
+                        rr=1.2
                     )
 
                     if tp_price is None:
@@ -283,7 +283,7 @@ def run_bot():
 
                     log_info(f"{symbol} RR: {rr:.2f}")
 
-                    if rr < 1.2:
+                    if rr < 1.0:
                         log_warning(f"{symbol} RR TOO LOW: {rr:.2f}")
                         continue
 
