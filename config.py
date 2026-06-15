@@ -18,6 +18,12 @@ LEVERAGE = int(os.getenv("LEVERAGE"))
 ROI_PERCENT_TP = float(os.getenv("ROI_PERCENT_TP"))
 MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
+RR_TAKE_PROFIT = float(os.getenv("RR_TAKE_PROFIT", 1.2))
+
+TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "False") == "True"
+TRAILING_TP_PERCENT = float(os.getenv("TRAILING_TP_PERCENT", 50))
+TRAILING_CALLBACK_RATE = float(os.getenv("TRAILING_CALLBACK_RATE", 0.7))
+
 MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MODE = os.getenv("MODE")
 

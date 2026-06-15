@@ -401,6 +401,116 @@ def get_structure_aware_take_profit(df, side, sl_price, rr=1.5):
         return None
 
 
+def calculate_trailing_activation_price(entry_price, tp_price, side):
+
+    try:
+
+        tp_percent = config.TRAILING_TP_PERCENT / 100
+
+        if side == SIDE_BUY or side == "BUY":
+
+            if tp_price <= entry_price:
+                return None
+
+            activation_price = entry_price + (
+                (tp_price - entry_price) * tp_percent
+            )
+
+        else:
+
+            if tp_price >= entry_price:
+                return None
+
+            activation_price = entry_price - (
+                (entry_price - tp_price) * tp_percent
+            )
+
+        return activation_price
+
+    except Exception as e:
+        log_error(f"TRAILING ACTIVATION ERROR: {e}")
+        return None
+
+
+def place_native_trailing_stop(symbol, side, entry_price, quantity, tp_price):
+
+    try:
+
+        if not config.TRAILING_STOP_ENABLED:
+            return
+
+        precision = get_price_precision(symbol)
+
+        if side == SIDE_BUY or side == "BUY":
+            close_side = SIDE_SELL
+        else:
+            close_side = SIDE_BUY
+
+        activation_price = calculate_trailing_activation_price(
+            entry_price,
+            tp_price,
+            side
+        )
+
+        if activation_price is None:
+            log_warning(f"{symbol} TRAILING SKIP | INVALID ACTIVATION")
+            return
+
+        activation_price = round(activation_price, precision)
+        activation_price_str = f"{activation_price:.{precision}f}"
+        callback_rate_str = str(config.TRAILING_CALLBACK_RATE)
+
+        market_price = float(
+            client.futures_mark_price(symbol=symbol)['markPrice']
+        )
+
+        if side == SIDE_BUY or side == "BUY":
+            if activation_price <= market_price:
+                log_warning(f"{symbol} TRAILING SKIP | INVALID ACTIVATION VS MARKET")
+                return
+        else:
+            if activation_price >= market_price:
+                log_warning(f"{symbol} TRAILING SKIP | INVALID ACTIVATION VS MARKET")
+                return
+
+        log_info(
+            f"{symbol} TRAILING DEBUG | "
+            f"ENTRY_SIDE={side} | "
+            f"CLOSE_SIDE={close_side} | "
+            f"ENTRY={entry_price} | "
+            f"TP={tp_price} | "
+            f"ACTIVATION={activation_price_str} | "
+            f"TP_PERCENT={config.TRAILING_TP_PERCENT}% | "
+            f"CALLBACK={config.TRAILING_CALLBACK_RATE}"
+        )
+
+        params = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": close_side,
+            "type": "TRAILING_STOP_MARKET",
+            "quantity": quantity,
+            "activatePrice": activation_price_str,
+            "callbackRate": str(config.TRAILING_CALLBACK_RATE),
+            "workingType": "MARK_PRICE",
+            "reduceOnly": "true",
+            "newOrderRespType": "RESULT"
+        }
+
+        trailing_order = client._request_futures_api(
+            "post",
+            "algoOrder",
+            True,
+            data=params
+        )
+
+        log_info(f"{symbol} TRAILING ORDER RESPONSE: {trailing_order}")
+        log_info(f"{symbol} TRAILING STOP CREATED")
+
+    except Exception as e:
+        log_error(f"{symbol} TRAILING STOP error: {e}")
+
+
 # =========================
 # TP/SL EXECUTION (CLEAN VERSION)
 # =========================
@@ -468,6 +578,17 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
             closePosition=True,
             workingType="MARK_PRICE",
             priceProtect=True
+        )
+
+        time.sleep(2)
+
+        # TRAILING STOP
+        place_native_trailing_stop(
+            symbol,
+            side,
+            entry_price,
+            quantity,
+            tp_price
         )
 
         log_info(f"{symbol} TP/SL CREATED")

@@ -265,7 +265,7 @@ def run_bot():
                         entry_price,
                         sl_price,
                         signal,
-                        rr=1.2
+                        rr=config.RR_TAKE_PROFIT
                     )
 
                     if tp_price is None:
