@@ -80,6 +80,14 @@ def apply_indicators(df):
         df['volume_sma'] = df['volume'].rolling(20).mean()
 
         # =========================
+        # VWAP
+        # =========================
+        typical_price = (df['high'] + df['low'] + df['close']) / 3
+        cumulative_volume = df['volume'].cumsum()
+        cumulative_vp = (typical_price * df['volume']).cumsum()
+        df['vwap'] = cumulative_vp / (cumulative_volume + 1e-10)
+
+        # =========================
         # CLEAN DATA
         # =========================
         df.dropna(inplace=True)

@@ -4,7 +4,7 @@ from ai_model import ai_confidence_boost
 from exchange import get_support_resistance
 
 
-def score_to_confidence(score, max_score=12):
+def score_to_confidence(score, max_score=20):
 
     if score <= 0:
         return 0
@@ -101,6 +101,57 @@ def detect_order_block(df):
         return None, None, None
 
 
+
+
+# =========================================================
+# MARKET STRUCTURE DETECTION (BOS / CHOCH CONTEXT)
+# =========================================================
+def detect_market_structure(df):
+
+    try:
+
+        recent_high = df['high'].iloc[-20:-5].max()
+        recent_low = df['low'].iloc[-20:-5].min()
+        prev_high = df['high'].iloc[-35:-20].max()
+        prev_low = df['low'].iloc[-35:-20].min()
+        last_close = df['close'].iloc[-2]
+
+        bullish_structure = (
+            recent_high > prev_high
+            and recent_low > prev_low
+        )
+
+        bearish_structure = (
+            recent_high < prev_high
+            and recent_low < prev_low
+        )
+
+        bullish_bos = last_close > recent_high
+        bearish_bos = last_close < recent_low
+
+        bullish_choch = bearish_structure and last_close > recent_high
+        bearish_choch = bullish_structure and last_close < recent_low
+
+        return {
+            "bullish_structure": bullish_structure,
+            "bearish_structure": bearish_structure,
+            "bullish_bos": bullish_bos,
+            "bearish_bos": bearish_bos,
+            "bullish_choch": bullish_choch,
+            "bearish_choch": bearish_choch
+        }
+
+    except Exception:
+        return {
+            "bullish_structure": False,
+            "bearish_structure": False,
+            "bullish_bos": False,
+            "bearish_bos": False,
+            "bullish_choch": False,
+            "bearish_choch": False
+        }
+
+
 # =========================================================
 # MAIN SIGNAL ENGINE (UPDATED INTEGRATION + CONFIRMATIONS)
 # =========================================================
@@ -123,6 +174,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
         bullish_sweep, bearish_sweep = detect_liquidity_sweep(confirm_df)
         ob_high, ob_low, ob_type = detect_order_block(confirm_df)
+        structure = detect_market_structure(trend_df)
 
         atr_pct = (entry['atr'] / entry['close']) * 100
 
@@ -164,6 +216,16 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             / entry['ema20']
         ) * 100
 
+        vwap_buy_ok = (
+            'vwap' in entry.index
+            and entry['close'] > entry['vwap']
+        )
+
+        vwap_sell_ok = (
+            'vwap' in entry.index
+            and entry['close'] < entry['vwap']
+        )
+
         if ema20_distance > 0.8:
             log_warning(
                 f"EMA20 TOO FAR: {round(ema20_distance,2)}%"
@@ -202,6 +264,21 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if buy_valid:
             buy_score += 5
 
+        if structure['bullish_structure']:
+            buy_score += 2
+
+        if structure['bullish_bos']:
+            buy_score += 1
+
+        if structure['bearish_choch']:
+            buy_score -= 2
+
+        if vwap_buy_ok:
+            buy_score += 1
+
+        elif 'vwap' in entry.index and entry['close'] < entry['vwap']:
+            buy_score -= 1
+
         if bullish_ema_rejection:
             buy_score += 1
 
@@ -230,7 +307,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
         # Relative strength
         if rs > 1:
-            buy_score += 1
+            buy_score += 2
+
+        elif rs < -1:
+            buy_score -= 1
 
         # Liquidity / OB
         if bullish_sweep:
@@ -306,6 +386,21 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if sell_valid:
             sell_score += 5
 
+        if structure['bearish_structure']:
+            sell_score += 2
+
+        if structure['bearish_bos']:
+            sell_score += 1
+
+        if structure['bullish_choch']:
+            sell_score -= 2
+
+        if vwap_sell_ok:
+            sell_score += 1
+
+        elif 'vwap' in entry.index and entry['close'] > entry['vwap']:
+            sell_score -= 1
+
         if bearish_ema_rejection:
             sell_score += 1
 
@@ -334,7 +429,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
         # Relative strength
         if rs < -1:
-            sell_score += 1
+            sell_score += 2
+
+        elif rs > 1:
+            sell_score -= 1
 
         # Liquidity / OB
         if bearish_sweep:

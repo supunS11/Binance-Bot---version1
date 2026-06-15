@@ -1,5 +1,6 @@
 import config
 
+
 def ai_confidence_boost(
     trend_df,
     confirm_df,
@@ -17,23 +18,6 @@ def ai_confidence_boost(
         confirm = confirm_df.iloc[-2]
         entry = entry_df.iloc[-2]
         trend = trend_df.iloc[-2]
-
-        support = trend_df['low'].rolling(50).min().iloc[-1]
-        resistance = trend_df['high'].rolling(50).max().iloc[-1]
-        price = trend_df['close'].iloc[-1]
-
-        resistance_distance = (
-            (resistance - price) / price
-        ) * 100
-
-        support_distance = (
-            (price - support) / price
-        ) * 100
-
-        required_distance = (
-            config.ROI_PERCENT_TP /
-            config.LEVERAGE
-        ) + 0.7
 
         # ======================
         # ADX FILTER
@@ -75,19 +59,30 @@ def ai_confidence_boost(
         # ======================
         if signal == "BUY":
 
-            if (
-                trend['close'] > trend['ema50']
-                and resistance_distance > required_distance
-            ):
+            if trend['close'] > trend['ema50']:
                 boost += 5
 
         else:
 
-            if (
-                trend['close'] < trend['ema50']
-                and support_distance > required_distance
-            ):
+            if trend['close'] < trend['ema50']:
                 boost += 5
+
+        # ======================
+        # VWAP CONTEXT
+        # ======================
+        if 'vwap' in entry.index:
+
+            if signal == "BUY" and entry['close'] > entry['vwap']:
+                boost += 2
+
+            elif signal == "SELL" and entry['close'] < entry['vwap']:
+                boost += 2
+
+            elif signal == "BUY" and entry['close'] < entry['vwap']:
+                boost -= 2
+
+            elif signal == "SELL" and entry['close'] > entry['vwap']:
+                boost -= 2
 
         # ======================
         # EMA20 PULLBACK BONUS
@@ -131,10 +126,16 @@ def ai_confidence_boost(
         if rs is not None:
 
             if signal == "BUY" and rs > 2:
-                boost += 3
+                boost += 4
 
             elif signal == "SELL" and rs < -2:
-                boost += 3
+                boost += 4
+
+            elif signal == "BUY" and rs < -2:
+                boost -= 3
+
+            elif signal == "SELL" and rs > 2:
+                boost -= 3
 
         # ======================
         # VOLATILITY CHECK

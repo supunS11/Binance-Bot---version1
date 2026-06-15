@@ -745,3 +745,54 @@ def get_support_resistance(df, lookback=50):
     except Exception as e:
         log_error(f"SR ERROR: {e}")
         return None, None
+
+
+def cancel_remaining_orders(symbol):
+
+    try:
+
+        # Normal open orders
+        try:
+
+            client.futures_cancel_all_open_orders(
+                symbol=symbol
+            )
+
+            log_info(
+                f"{symbol} OPEN ORDERS CANCELED"
+            )
+
+        except Exception as e:
+
+            log_warning(
+                f"{symbol} OPEN ORDER CANCEL WARNING: {e}"
+            )
+
+        # Algo orders (Trailing / Conditional)
+        try:
+
+            response = client._request_futures_api(
+                "delete",
+                "algoOpenOrders",
+                True,
+                data={
+                    "symbol": symbol
+                }
+            )
+
+            log_info(
+                f"{symbol} ALGO ORDERS CANCELED: "
+                f"{response}"
+            )
+
+        except Exception as e:
+
+            log_warning(
+                f"{symbol} ALGO ORDER CANCEL WARNING: {e}"
+            )
+
+    except Exception as e:
+
+        log_error(
+            f"{symbol} CANCEL ORDERS ERROR: {e}"
+        )

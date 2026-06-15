@@ -10,6 +10,7 @@ from exchange import (
     get_balance,
     place_market_order,
     place_tp_sl,
+    cancel_remaining_orders,
     has_open_position,
     get_open_position_counts,
     is_position_closed,
@@ -53,6 +54,8 @@ def run_bot():
                     if symbol in trade_times:
 
                         if is_position_closed(symbol):
+
+                            cancel_remaining_orders(symbol)
 
                             exit_time = datetime.now()
                             entry_time = trade_times[symbol]['entry_time']
