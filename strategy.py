@@ -492,11 +492,11 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         if abs(buy_conf - sell_conf) < 8:
             return None
 
-        if buy_conf >= 65 and buy_conf > sell_conf:
+        if buy_conf >= 75 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
             return "BUY"
 
-        if sell_conf >= 65 and sell_conf > buy_conf:
+        if sell_conf >= 75 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
             return "SELL"
 
