@@ -4,7 +4,7 @@ from ai_model import ai_confidence_boost
 from exchange import get_support_resistance
 
 
-def score_to_confidence(score, max_score=20):
+def score_to_confidence(score, max_score=22):
 
     if score <= 0:
         return 0
@@ -529,7 +529,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs, return
         if abs(buy_conf - sell_conf) < 8:
             return None
 
-        if buy_conf >= 75 and buy_conf > sell_conf:
+        if buy_conf >= 80 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
 
             if return_confidence:
@@ -537,7 +537,7 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs, return
 
             return "BUY"
 
-        if sell_conf >= 75 and sell_conf > buy_conf:
+        if sell_conf >= 80 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
 
             if return_confidence:

@@ -15,7 +15,6 @@ SL_TIMEFRAME = os.getenv("SL_TIMEFRAME")
 
 LEVERAGE = int(os.getenv("LEVERAGE"))
 
-ROI_PERCENT_TP = float(os.getenv("ROI_PERCENT_TP"))
 MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
 RR_TAKE_PROFIT = float(os.getenv("RR_TAKE_PROFIT", 1.2))
