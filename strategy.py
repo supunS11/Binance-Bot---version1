@@ -155,7 +155,7 @@ def detect_market_structure(df):
 # =========================================================
 # MAIN SIGNAL ENGINE (UPDATED INTEGRATION + CONFIRMATIONS)
 # =========================================================
-def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
+def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs, return_confidence=False):
 
     try:
 
@@ -175,6 +175,35 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
         bullish_sweep, bearish_sweep = detect_liquidity_sweep(confirm_df)
         ob_high, ob_low, ob_type = detect_order_block(confirm_df)
         structure = detect_market_structure(trend_df)
+
+        # ======================
+        # REVERSAL GUARD
+        # ======================
+        trend_latest = trend_df.iloc[-2]
+        confirm_latest = confirm_df.iloc[-2]
+        entry_latest = entry_df.iloc[-2]
+
+        bullish_reversal_guard = (
+            structure['bullish_choch']
+            or structure['bullish_bos']
+            or (
+                'vwap' in entry_latest.index
+                and entry_latest['close'] > entry_latest['vwap']
+                and confirm_latest['close'] > confirm_latest['ema20']
+                and confirm_latest['macd'] > confirm_latest['macd_signal']
+            )
+        )
+
+        bearish_reversal_guard = (
+            structure['bearish_choch']
+            or structure['bearish_bos']
+            or (
+                'vwap' in entry_latest.index
+                and entry_latest['close'] < entry_latest['vwap']
+                and confirm_latest['close'] < confirm_latest['ema20']
+                and confirm_latest['macd'] < confirm_latest['macd_signal']
+            )
+        )
 
         atr_pct = (entry['atr'] / entry['close']) * 100
 
@@ -249,6 +278,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             trend['ema20'] > trend['ema50']
             and trend['close'] > trend['ema50']
         )
+
+        if bearish_reversal_guard:
+            buy_score -= 5
+            log_info("BUY REVERSAL GUARD ACTIVE")
 
         buy_momentum_ok = (
             confirm['macd'] > confirm['macd_signal']
@@ -372,6 +405,10 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
             and trend['close'] < trend['ema50']
         )
 
+        if bullish_reversal_guard:
+            sell_score -= 5
+            log_info("SELL REVERSAL GUARD ACTIVE")
+
         sell_momentum_ok = (
             confirm['macd'] < confirm['macd_signal']
             or confirm['rsi'] < 48
@@ -494,14 +531,29 @@ def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):
 
         if buy_conf >= 75 and buy_conf > sell_conf:
             log_info(f"FINAL BUY CONFIDENCE: {buy_conf}")
+
+            if return_confidence:
+                return "BUY", buy_conf
+
             return "BUY"
 
         if sell_conf >= 75 and sell_conf > buy_conf:
             log_info(f"FINAL SELL CONFIDENCE: {sell_conf}")
+
+            if return_confidence:
+                return "SELL", sell_conf
+
             return "SELL"
+
+        if return_confidence:
+            return None, max(buy_conf, sell_conf)
 
         return None
 
     except Exception as e:
         log_error(f"STRATEGY ERROR: {e}")
+
+        if return_confidence:
+            return None, 0
+
         return None

@@ -22,6 +22,7 @@ from exchange import (
     get_btc_correlation,
     get_relative_strength,
     calculate_rr_take_profit,
+    calculate_static_roi_take_profit,
     validate_min_notional
 )
 
@@ -116,14 +117,23 @@ def run_bot():
                     # =========================
                     # SIGNAL
                     # =========================
-                    signal = check_signal(
+                    signal_result = check_signal(
                         trend_df,
                         confirm_df,
                         entry_df,
                         btc_trend,
                         btc_corr,
-                        rs
+                        rs,
+                        return_confidence=True
                     )
+
+                    signal = None
+                    signal_confidence = 0
+
+                    if isinstance(signal_result, tuple):
+                        signal, signal_confidence = signal_result
+                    else:
+                        signal = signal_result
 
                     if not signal:
                         log_warning(
@@ -135,6 +145,19 @@ def run_bot():
                         continue
 
                     log_info(f"{symbol} SIGNAL: {signal}")
+                    log_info(f"{symbol} SIGNAL CONFIDENCE: {signal_confidence}%")
+
+                    trade_leverage = config.LEVERAGE
+
+                    if (
+                        config.HIGH_CONFIDENCE_LEVERAGE_ENABLED
+                        and signal_confidence >= config.HIGH_CONFIDENCE_THRESHOLD
+                    ):
+                        trade_leverage = config.HIGH_CONFIDENCE_LEVERAGE
+                        log_info(
+                            f"{symbol} HIGH CONFIDENCE LEVERAGE: "
+                            f"{trade_leverage}x"
+                        )
 
                     # =========================
                     # POSITION LIMITS
@@ -195,7 +218,7 @@ def run_bot():
                     # SL RISK VALIDATION (CRITICAL FIX)
                     # =========================
                     risk_pct = abs(current_price - sl_price) / current_price
-                    sl_roi = risk_pct * config.LEVERAGE * 100
+                    sl_roi = risk_pct * trade_leverage * 100
 
                     log_info(f"{symbol} PRE-TRADE SL ROI: {sl_roi:.2f}%")
 
@@ -215,7 +238,8 @@ def run_bot():
                         current_price,
                         sl_price,
                         symbol,
-                        config.MARGIN_PER_TRADE
+                        config.MARGIN_PER_TRADE,
+                        leverage_override=trade_leverage
                     )
 
                     notional = quantity * current_price
@@ -233,7 +257,7 @@ def run_bot():
                     # =========================
                     # LEVERAGE
                     # =========================
-                    if not setup_leverage(symbol):
+                    if not setup_leverage(symbol, trade_leverage):
                         continue
 
                     notional_ok, notional = validate_min_notional(
@@ -264,12 +288,34 @@ def run_bot():
                         log_warning(f"{symbol} ENTRY PRICE NOT FOUND")
                         continue
 
-                    tp_price = calculate_rr_take_profit(
-                        entry_price,
-                        sl_price,
-                        signal,
-                        rr=config.RR_TAKE_PROFIT
-                    )
+                    if config.STATIC_TP_ENABLED:
+
+                        tp_price = calculate_static_roi_take_profit(
+                            entry_price,
+                            signal,
+                            config.STATIC_TP_ROI,
+                            leverage=trade_leverage
+                        )
+
+                        log_info(
+                            f"{symbol} STATIC TP MODE | "
+                            f"ROI={config.STATIC_TP_ROI}% | "
+                            f"LEVERAGE={trade_leverage}x"
+                        )
+
+                    else:
+
+                        tp_price = calculate_rr_take_profit(
+                            entry_price,
+                            sl_price,
+                            signal,
+                            rr=config.RR_TAKE_PROFIT
+                        )
+
+                        log_info(
+                            f"{symbol} STRUCTURE/RR TP MODE | "
+                            f"RR={config.RR_TAKE_PROFIT}"
+                        )
 
                     if tp_price is None:
                         log_warning(f"{symbol} INVALID TP/SL")
@@ -286,7 +332,7 @@ def run_bot():
 
                     log_info(f"{symbol} RR: {rr:.2f}")
 
-                    if rr < 1.0:
+                    if rr < 1.0 and not config.STATIC_TP_ENABLED:
                         log_warning(f"{symbol} RR TOO LOW: {rr:.2f}")
                         continue
 
@@ -308,7 +354,9 @@ def run_bot():
                     # =========================
                     trade_times[symbol] = {
                         "entry_time": datetime.now(),
-                        "side": signal
+                        "side": signal,
+                        "confidence": signal_confidence,
+                        "leverage": trade_leverage
                     }
 
                     # =========================
@@ -319,6 +367,7 @@ def run_bot():
                         f"ENTRY: {entry_price}\n"
                         f"SL: {sl_price}\n"
                         f"SL ROI: {sl_roi:.2f}%\n"
+                        f"LEVERAGE: {trade_leverage}x\n"
                         f"BALANCE: {balance}\n"
                     )
 

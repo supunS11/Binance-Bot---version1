@@ -5,7 +5,7 @@ from exchange import get_symbol_precision
 MIN_NOTIONAL = 5.0
 
 
-def calculate_position_size(balance, entry_price, sl_price, symbol, margin_override=None):
+def calculate_position_size(balance, entry_price, sl_price, symbol, margin_override=None, leverage_override=None):
 
     try:
 
@@ -14,7 +14,9 @@ def calculate_position_size(balance, entry_price, sl_price, symbol, margin_overr
         # =========================
         # BASE NOTIONAL FROM MARGIN
         # =========================
-        base_notional = margin * config.LEVERAGE
+        leverage = leverage_override if leverage_override is not None else config.LEVERAGE
+
+        base_notional = margin * leverage
 
         # convert to quantity
         qty_from_margin = base_notional / entry_price

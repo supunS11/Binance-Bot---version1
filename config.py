@@ -20,6 +20,19 @@ MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
 RR_TAKE_PROFIT = float(os.getenv("RR_TAKE_PROFIT", 1.2))
 
+# =========================
+# TAKE PROFIT MODE
+# =========================
+STATIC_TP_ENABLED = os.getenv("STATIC_TP_ENABLED", "False") == "True"
+STATIC_TP_ROI = float(os.getenv("STATIC_TP_ROI", os.getenv("ROI_PERCENT_TP", 10)))
+
+# =========================
+# HIGH CONFIDENCE LEVERAGE
+# =========================
+HIGH_CONFIDENCE_LEVERAGE_ENABLED = os.getenv("HIGH_CONFIDENCE_LEVERAGE_ENABLED", "False") == "True"
+HIGH_CONFIDENCE_THRESHOLD = float(os.getenv("HIGH_CONFIDENCE_THRESHOLD", 100))
+HIGH_CONFIDENCE_LEVERAGE = int(os.getenv("HIGH_CONFIDENCE_LEVERAGE", LEVERAGE))
+
 TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "False") == "True"
 TRAILING_TP_PERCENT = float(os.getenv("TRAILING_TP_PERCENT", 50))
 TRAILING_CALLBACK_RATE = float(os.getenv("TRAILING_CALLBACK_RATE", 0.7))

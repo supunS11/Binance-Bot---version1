@@ -40,18 +40,20 @@ def set_margin_type(symbol):
 # =========================
 # LEVERAGE
 # =========================
-def setup_leverage(symbol):
+def setup_leverage(symbol, leverage=None):
 
     try:
 
+        leverage_to_use = leverage if leverage is not None else config.LEVERAGE
+
         response = client.futures_change_leverage(
             symbol=symbol,
-            leverage=config.LEVERAGE
+            leverage=leverage_to_use
         )
 
         actual = int(response['leverage'])
 
-        if actual != config.LEVERAGE:
+        if actual != leverage_to_use:
             log_warning(f"{symbol} leverage mismatch")
             return False
 
@@ -368,6 +370,28 @@ def calculate_rr_take_profit(entry_price, sl_price, side, rr=1.5):
             return entry_price - (risk * rr)
 
     except Exception:
+        return None
+
+
+def calculate_static_roi_take_profit(entry_price, side, roi_percent, leverage=None):
+
+    try:
+
+        leverage_to_use = leverage if leverage is not None else config.LEVERAGE
+
+        if leverage_to_use <= 0:
+            return None
+
+        price_move_pct = (roi_percent / leverage_to_use) / 100
+
+        if side == SIDE_BUY or side == "BUY":
+            return entry_price * (1 + price_move_pct)
+
+        else:
+            return entry_price * (1 - price_move_pct)
+
+    except Exception as e:
+        log_error(f"STATIC TP ERROR: {e}")
         return None
 
 
