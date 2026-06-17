@@ -141,11 +141,11 @@ def ai_confidence_boost(
         # VOLATILITY CHECK
         # ======================
         recent_range = (
-            trend_df['high'].iloc[-10:].max()
-            - trend_df['low'].iloc[-10:].min()
+            trend_df['high'].iloc[-11:-1].max()
+            - trend_df['low'].iloc[-11:-1].min()
         )
 
-        avg_range = trend_df['atr'].iloc[-1] * 2
+        avg_range = trend_df['atr'].iloc[-2] * 2
 
         if recent_range < avg_range:
             boost -= 2

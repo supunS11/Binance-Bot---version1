@@ -1,62 +1,140 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
+
+
+def env_bool(name, default="False"):
+    return os.getenv(name, default).strip().lower() == "true"
+
 
 API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-SYMBOLS = os.getenv("SYMBOLS").split(",")
+SYMBOLS = [
+    symbol.strip() for symbol in os.getenv("SYMBOLS").split(",") if symbol.strip()
+]
 
 TREND_TIMEFRAME = os.getenv("TREND_TIMEFRAME")
 CONFIRMATION_TIMEFRAME = os.getenv("CONFIRMATION_TIMEFRAME")
 ENTRY_TIMEFRAME = os.getenv("ENTRY_TIMEFRAME")
 SL_TIMEFRAME = os.getenv("SL_TIMEFRAME")
+KLINE_LIMIT = int(os.getenv("KLINE_LIMIT", 300))
 
 LEVERAGE = int(os.getenv("LEVERAGE"))
 
 MAX_SL_ROI = float(os.getenv("MAX_SL_ROI"))
 
-RR_TAKE_PROFIT = float(os.getenv("RR_TAKE_PROFIT", 1.2))
+RR_TAKE_PROFIT = float(os.getenv("RR_TAKE_PROFIT"))
 
 # =========================
 # TAKE PROFIT MODE
 # =========================
-STATIC_TP_ENABLED = os.getenv("STATIC_TP_ENABLED", "False") == "True"
-STATIC_TP_ROI = float(os.getenv("STATIC_TP_ROI", os.getenv("ROI_PERCENT_TP", 10)))
+STATIC_TP_ENABLED = env_bool("STATIC_TP_ENABLED")
+STATIC_TP_ROI = float(os.getenv("STATIC_TP_ROI", os.getenv("ROI_PERCENT_TP")))
+ADAPTIVE_TP_ENABLED = env_bool("ADAPTIVE_TP_ENABLED", "True")
+ADAPTIVE_MIN_RR = float(os.getenv("ADAPTIVE_MIN_RR"))
+MIN_TRADE_RR = float(os.getenv("MIN_TRADE_RR", ADAPTIVE_MIN_RR))
+MIN_FINAL_TP_SL_RR = float(os.getenv("MIN_FINAL_TP_SL_RR", 1.1))
+ADAPTIVE_TP_MAX_ROI = float(os.getenv("ADAPTIVE_TP_MAX_ROI", STATIC_TP_ROI))
+
+CONTINUATION_SIGNAL_THRESHOLD = float(os.getenv("CONTINUATION_SIGNAL_THRESHOLD"))
+REVERSAL_SIGNAL_THRESHOLD = float(os.getenv("REVERSAL_SIGNAL_THRESHOLD"))
+
+MAX_SIGNAL_EMA20_DISTANCE_PCT = float(os.getenv("MAX_SIGNAL_EMA20_DISTANCE_PCT", 1.6))
+MAX_ENTRY_EMA20_DISTANCE_PCT = float(
+    os.getenv("MAX_ENTRY_EMA20_DISTANCE_PCT", MAX_SIGNAL_EMA20_DISTANCE_PCT)
+)
+MAX_SIGNAL_CANDLE_ATR = float(os.getenv("MAX_SIGNAL_CANDLE_ATR", 1.8))
+MIN_ENTRY_SR_ROOM_R = float(os.getenv("MIN_ENTRY_SR_ROOM_R", 0.8))
+ENTRY_EMA20_TOLERANCE_PCT = float(os.getenv("ENTRY_EMA20_TOLERANCE_PCT", 0.12))
+MIN_VOLUME_SMA_MULT = float(os.getenv("MIN_VOLUME_SMA_MULT", 1.02))
+MIN_SIGNAL_BODY_RATIO = float(os.getenv("MIN_SIGNAL_BODY_RATIO", 0.25))
+MIN_SIGNAL_CLOSE_POSITION = float(os.getenv("MIN_SIGNAL_CLOSE_POSITION", 0.45))
+MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", 0.15))
+MAX_ATR_PCT = float(os.getenv("MAX_ATR_PCT", 3.2))
+MIN_EMA_GAP_PCT = float(os.getenv("MIN_EMA_GAP_PCT", 0.18))
+MAX_EMA_GAP_PCT = float(os.getenv("MAX_EMA_GAP_PCT", 4.5))
+SIDEWAYS_ADX = float(os.getenv("SIDEWAYS_ADX", 15))
+TRENDING_ADX = float(os.getenv("TRENDING_ADX", 25))
+MAX_LATE_ENTRY_ATR = float(os.getenv("MAX_LATE_ENTRY_ATR", 1.8))
+MAX_DIRECTION_CANDLES = int(os.getenv("MAX_DIRECTION_CANDLES", 4))
+MAX_CHASE_DISTANCE_PCT = float(os.getenv("MAX_CHASE_DISTANCE_PCT", 0.45))
+BUY_RSI_OVERHEAT = float(os.getenv("BUY_RSI_OVERHEAT", 72))
+SELL_RSI_OVERHEAT = float(os.getenv("SELL_RSI_OVERHEAT", 28))
+PULLBACK_TOLERANCE_PCT = float(os.getenv("PULLBACK_TOLERANCE_PCT", 0.35))
+SCALP_BUY_MIN_RSI = float(os.getenv("SCALP_BUY_MIN_RSI", 48))
+SCALP_SELL_MAX_RSI = float(os.getenv("SCALP_SELL_MAX_RSI", 52))
+SCALP_REQUIRE_STRUCTURE = env_bool("SCALP_REQUIRE_STRUCTURE", "True")
+SCALP_BUY_MAX_RSI = float(os.getenv("SCALP_BUY_MAX_RSI", 66))
+SCALP_SELL_MIN_RSI = float(os.getenv("SCALP_SELL_MIN_RSI", 34))
+FLOW_SL_ATR_MULT = float(os.getenv("FLOW_SL_ATR_MULT", 1.2))
+FLOW_BUY_MIN_RSI = float(os.getenv("FLOW_BUY_MIN_RSI", 47))
+FLOW_BUY_MAX_RSI = float(os.getenv("FLOW_BUY_MAX_RSI", 72))
+FLOW_SELL_MAX_RSI = float(os.getenv("FLOW_SELL_MAX_RSI", 53))
+FLOW_SELL_MIN_RSI = float(os.getenv("FLOW_SELL_MIN_RSI", 28))
+FLOW_EMA_SLOPE_TOLERANCE_ATR = float(os.getenv("FLOW_EMA_SLOPE_TOLERANCE_ATR", 0.05))
+LIVE_ENTRY_CONFIRMATION_ENABLED = env_bool("LIVE_ENTRY_CONFIRMATION_ENABLED", "True")
+MAX_LIVE_ENTRY_RETRACE_ATR = float(os.getenv("MAX_LIVE_ENTRY_RETRACE_ATR", 0.25))
+MAX_LIVE_ENTRY_CHASE_ATR = float(os.getenv("MAX_LIVE_ENTRY_CHASE_ATR", 0.35))
+LIVE_ENTRY_EMA_TOLERANCE_PCT = float(os.getenv("LIVE_ENTRY_EMA_TOLERANCE_PCT", 0.08))
+EARLY_FLOW_EXIT_ENABLED = env_bool("EARLY_FLOW_EXIT_ENABLED", "True")
+EARLY_FLOW_EXIT_MINUTES = float(os.getenv("EARLY_FLOW_EXIT_MINUTES", 10))
+EARLY_FLOW_EXIT_MAX_ROI = float(os.getenv("EARLY_FLOW_EXIT_MAX_ROI", 0))
+EARLY_FLOW_EXIT_EMA_TOLERANCE_PCT = float(
+    os.getenv("EARLY_FLOW_EXIT_EMA_TOLERANCE_PCT", 0.05)
+)
+MIN_BREAKOUT_RETEST_SCORE = float(os.getenv("MIN_BREAKOUT_RETEST_SCORE", 72))
+MIN_CONTINUATION_SCORE = float(os.getenv("MIN_CONTINUATION_SCORE", 8))
+MIN_BREAKOUT_SCORE = float(os.getenv("MIN_BREAKOUT_SCORE", 10))
+MIN_REVERSAL_SCORE = float(os.getenv("MIN_REVERSAL_SCORE", 7))
 
 # =========================
 # HIGH CONFIDENCE LEVERAGE
 # =========================
-HIGH_CONFIDENCE_LEVERAGE_ENABLED = os.getenv("HIGH_CONFIDENCE_LEVERAGE_ENABLED", "False") == "True"
-HIGH_CONFIDENCE_THRESHOLD = float(os.getenv("HIGH_CONFIDENCE_THRESHOLD", 100))
-HIGH_CONFIDENCE_LEVERAGE = int(os.getenv("HIGH_CONFIDENCE_LEVERAGE", LEVERAGE))
+HIGH_CONFIDENCE_LEVERAGE_ENABLED = env_bool("HIGH_CONFIDENCE_LEVERAGE_ENABLED")
+HIGH_CONFIDENCE_THRESHOLD = float(os.getenv("HIGH_CONFIDENCE_THRESHOLD"))
+HIGH_CONFIDENCE_LEVERAGE = int(os.getenv("HIGH_CONFIDENCE_LEVERAGE"))
 
-TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "False") == "True"
-TRAILING_TP_PERCENT = float(os.getenv("TRAILING_TP_PERCENT", 50))
-TRAILING_CALLBACK_RATE = float(os.getenv("TRAILING_CALLBACK_RATE", 0.7))
+TRAILING_STOP_ENABLED = env_bool("TRAILING_STOP_ENABLED")
+TRAILING_TP_PERCENT = float(os.getenv("TRAILING_TP_PERCENT"))
+TRAILING_CALLBACK_RATE = float(os.getenv("TRAILING_CALLBACK_RATE"))
+
+PROFIT_PROTECTION_ENABLED = env_bool("PROFIT_PROTECTION_ENABLED", "True")
+PROFIT_PROTECTION_TRIGGER_ROI = float(os.getenv("PROFIT_PROTECTION_TRIGGER_ROI", 3.0))
+PROFIT_PROTECTION_TRIGGER_TP_PCT = float(
+    os.getenv("PROFIT_PROTECTION_TRIGGER_TP_PCT", 0)
+)
+PROFIT_PROTECTION_RETRACE_PCT = float(os.getenv("PROFIT_PROTECTION_RETRACE_PCT", 40))
+TIME_EXIT_ENABLED = env_bool("TIME_EXIT_ENABLED", "True")
+TIME_EXIT_MINUTES = int(os.getenv("TIME_EXIT_MINUTES", 45))
+TIME_EXIT_MIN_ROI = float(os.getenv("TIME_EXIT_MIN_ROI", 0.4))
+STALE_EXIT_MINUTES = int(os.getenv("STALE_EXIT_MINUTES", 75))
+STALE_EXIT_MIN_ROI = float(os.getenv("STALE_EXIT_MIN_ROI", -0.6))
 
 MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MODE = os.getenv("MODE")
 
-MARGIN_PER_TRADE = float(os.getenv("MARGIN_PER_TRADE", 6))
+MARGIN_PER_TRADE = float(os.getenv("MARGIN_PER_TRADE"))
 
 MAX_TOTAL_POSITIONS = (
-    int(os.getenv("MAX_TOTAL_POSITIONS"))
-    if os.getenv("MAX_TOTAL_POSITIONS")
-    else None
+    int(os.getenv("MAX_TOTAL_POSITIONS")) if os.getenv("MAX_TOTAL_POSITIONS") else None
 )
 
 MAX_BUY_POSITIONS = (
-    int(os.getenv("MAX_BUY_POSITIONS"))
-    if os.getenv("MAX_BUY_POSITIONS")
-    else None
+    int(os.getenv("MAX_BUY_POSITIONS")) if os.getenv("MAX_BUY_POSITIONS") else None
 )
 
 MAX_SELL_POSITIONS = (
-    int(os.getenv("MAX_SELL_POSITIONS"))
-    if os.getenv("MAX_SELL_POSITIONS")
-    else None
+    int(os.getenv("MAX_SELL_POSITIONS")) if os.getenv("MAX_SELL_POSITIONS") else None
 )
 
-TESTNET = os.getenv("TESTNET") == "False"
+TRADE_JOURNAL_PATH = os.getenv("TRADE_JOURNAL_PATH", "logs/trade_journal.csv")
+COOLDOWN_AFTER_SL_MINUTES = int(os.getenv("COOLDOWN_AFTER_SL_MINUTES"))
+SYMBOL_COOLDOWN_AFTER_LOSS_MINUTES = int(
+    os.getenv("SYMBOL_COOLDOWN_AFTER_LOSS_MINUTES", COOLDOWN_AFTER_SL_MINUTES)
+)
+
+TESTNET = env_bool("TESTNET")

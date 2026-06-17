@@ -13,6 +13,7 @@ def apply_indicators(df):
         # =========================
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
 
         # =========================
         # RSI
@@ -56,7 +57,7 @@ def apply_indicators(df):
         # ADX (SMOOTHED VERSION FOR 5M)
         # =========================
         plus_dm = high.diff()
-        minus_dm = low.diff().abs()
+        minus_dm = -low.diff()
 
         plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
         minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)

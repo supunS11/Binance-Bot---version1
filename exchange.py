@@ -10,13 +10,28 @@ from indicators import apply_indicators
 from logger import log_info, log_warning, log_error
 
 
-client = Client(config.API_KEY, config.SECRET_KEY)
+_client = None
 
-# =========================
-# SYNC TIME
-# =========================
-server_time = client.get_server_time()
-client.timestamp_offset = server_time['serverTime'] - int(time.time() * 1000)
+
+def get_client():
+    global _client
+
+    if _client is None:
+        _client = Client(config.API_KEY, config.SECRET_KEY)
+        server_time = _client.get_server_time()
+        _client.timestamp_offset = (
+            server_time['serverTime'] - int(time.time() * 1000)
+        )
+
+    return _client
+
+
+class BinanceClientProxy:
+    def __getattr__(self, name):
+        return getattr(get_client(), name)
+
+
+client = BinanceClientProxy()
 
 
 # =========================
@@ -87,12 +102,45 @@ def get_unrealized_pnl():
     return float(client.futures_account()['totalUnrealizedProfit'])
 
 
+def get_mark_price(symbol):
+
+    try:
+        return float(client.futures_mark_price(symbol=symbol)['markPrice'])
+
+    except Exception as e:
+        log_error(f"{symbol} mark price error: {e}")
+        return None
+
+
+def get_realized_pnl_since(symbol, start_time):
+
+    try:
+        start_time_ms = int(start_time.timestamp() * 1000)
+
+        income = client.futures_income_history(
+            symbol=symbol,
+            incomeType="REALIZED_PNL",
+            startTime=start_time_ms,
+            limit=1000
+        )
+
+        return round(
+            sum(float(item.get("income", 0)) for item in income),
+            8
+        )
+
+    except Exception as e:
+        log_error(f"{symbol} realized pnl error: {e}")
+        return None
+
+
 # =========================
 # KLINES
 # =========================
-def get_klines(symbol, interval, limit=500):
+def get_klines(symbol, interval, limit=None):
 
     try:
+        limit = limit if limit is not None else config.KLINE_LIMIT
 
         klines = client.futures_klines(
             symbol=symbol,
@@ -183,6 +231,40 @@ def get_open_position_counts():
         return {"total": 0, "buy": 0, "sell": 0}
 
 
+def get_open_position_snapshot():
+
+    try:
+
+        positions = client.futures_position_information()
+        symbols = set()
+        total = buy = sell = 0
+
+        for p in positions:
+
+            amt = float(p['positionAmt'])
+
+            if amt == 0:
+                continue
+
+            symbols.add(p['symbol'])
+            total += 1
+
+            if amt > 0:
+                buy += 1
+            else:
+                sell += 1
+
+        return symbols, {
+            "total": total,
+            "buy": buy,
+            "sell": sell
+        }
+
+    except Exception as e:
+        log_error(f"position snapshot error: {e}")
+        return set(), {"total": 0, "buy": 0, "sell": 0}
+
+
 # =========================
 # PRECISION
 # =========================
@@ -232,6 +314,54 @@ def get_entry_price(symbol):
         log_error(f"{symbol} entry price error: {e}")
         return None
 
+
+def get_position_metrics(symbol):
+
+    try:
+        positions = client.futures_position_information(symbol=symbol)
+
+        if not positions:
+            return None
+
+        position = positions[0]
+        position_amt = float(position.get('positionAmt', 0))
+
+        if position_amt == 0:
+            return None
+
+        entry_price = float(position.get('entryPrice', 0))
+        mark_price = float(position.get('markPrice', 0))
+        unrealized_pnl = float(position.get('unRealizedProfit', 0))
+
+        if entry_price <= 0 or mark_price <= 0:
+            return None
+
+        side = "BUY" if position_amt > 0 else "SELL"
+
+        if side == "BUY":
+            price_move_pct = (mark_price - entry_price) / entry_price * 100
+        else:
+            price_move_pct = (entry_price - mark_price) / entry_price * 100
+
+        leveraged_roi = price_move_pct * config.LEVERAGE
+
+        return {
+            "symbol": symbol,
+            "side": side,
+            "position_amt": position_amt,
+            "quantity": abs(position_amt),
+            "entry_price": entry_price,
+            "mark_price": mark_price,
+            "unrealized_pnl": unrealized_pnl,
+            "price_move_pct": price_move_pct,
+            "leveraged_roi": leveraged_roi
+        }
+
+    except Exception as e:
+        log_error(f"{symbol} position metrics error: {e}")
+        return None
+
+
 # =========================
 # MARKET ORDER
 # =========================
@@ -251,6 +381,27 @@ def place_market_order(symbol, side, quantity):
 
     except Exception as e:
         log_error(f"{symbol} order error: {e}")
+        return None
+
+
+def close_market_position(symbol, entry_side, quantity):
+
+    try:
+        close_side = SIDE_SELL if entry_side == SIDE_BUY else SIDE_BUY
+
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type=FUTURE_ORDER_TYPE_MARKET,
+            quantity=quantity,
+            reduceOnly=True
+        )
+
+        log_warning(f"{symbol} EMERGENCY CLOSE: {close_side}")
+        return order
+
+    except Exception as e:
+        log_error(f"{symbol} emergency close error: {e}")
         return None
 
 
@@ -392,6 +543,92 @@ def calculate_static_roi_take_profit(entry_price, side, roi_percent, leverage=No
 
     except Exception as e:
         log_error(f"STATIC TP ERROR: {e}")
+        return None
+
+
+def calculate_adaptive_take_profit(
+    entry_price,
+    sl_price,
+    side,
+    sr_df,
+    rr=1.5,
+    min_rr=0.9,
+    max_roi=None,
+    leverage=None
+):
+
+    try:
+
+        rr_tp = calculate_rr_take_profit(
+            entry_price,
+            sl_price,
+            side,
+            rr=rr
+        )
+
+        if rr_tp is None:
+            return None
+
+        risk = abs(entry_price - sl_price)
+
+        if risk <= 0:
+            return None
+
+        min_reward = risk * min_rr
+        candidates = [rr_tp]
+
+        support, resistance = get_support_resistance(sr_df)
+
+        if side == SIDE_BUY or side == "BUY":
+
+            min_tp = entry_price + min_reward
+
+            if resistance is not None and resistance >= min_tp:
+                candidates.append(resistance)
+
+            if max_roi is not None:
+                capped_tp = calculate_static_roi_take_profit(
+                    entry_price,
+                    side,
+                    max_roi,
+                    leverage=leverage
+                )
+
+                if capped_tp is not None and capped_tp >= min_tp:
+                    candidates.append(capped_tp)
+
+            valid = [tp for tp in candidates if tp >= min_tp]
+
+            if not valid:
+                return None
+
+            return min(valid)
+
+        min_tp = entry_price - min_reward
+
+        if support is not None and support <= min_tp:
+            candidates.append(support)
+
+        if max_roi is not None:
+            capped_tp = calculate_static_roi_take_profit(
+                entry_price,
+                side,
+                max_roi,
+                leverage=leverage
+            )
+
+            if capped_tp is not None and capped_tp <= min_tp:
+                candidates.append(capped_tp)
+
+        valid = [tp for tp in candidates if tp <= min_tp]
+
+        if not valid:
+            return None
+
+        return max(valid)
+
+    except Exception as e:
+        log_error(f"ADAPTIVE TP ERROR: {e}")
         return None
 
 
@@ -571,10 +808,10 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
         # ================= VALIDATION ONLY =================
         if side == SIDE_BUY:
             if tp_price <= market_price or sl_price >= market_price:
-                return
+                return False
         else:
             if tp_price >= market_price or sl_price <= market_price:
-                return
+                return False
 
         log_info(
             f"{symbol}\nENTRY: {entry_price}\nTP: {tp_price}\nSL: {sl_price}"
@@ -618,9 +855,11 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
         log_info(f"{symbol} TP/SL CREATED")
 
         time.sleep(1)
+        return True
 
     except Exception as e:
         log_error(f"{symbol} TP/SL error: {e}")
+        return False
 
 
 # =========================
@@ -639,8 +878,8 @@ def get_btc_correlation(symbol):
         if coin_df is None or btc_df is None:
             return 0
 
-        coin_ret = coin_df['close'].pct_change().dropna()
-        btc_ret = btc_df['close'].pct_change().dropna()
+        coin_ret = coin_df['close'].iloc[:-1].pct_change().dropna()
+        btc_ret = btc_df['close'].iloc[:-1].pct_change().dropna()
 
         corr = np.corrcoef(coin_ret, btc_ret)[0, 1]
 
@@ -696,13 +935,13 @@ def get_relative_strength(symbol):
             return 0
 
         coin_r = (
-            (coin['close'].iloc[-1] - coin['close'].iloc[-10])
-            / coin['close'].iloc[-10]
+            (coin['close'].iloc[-2] - coin['close'].iloc[-11])
+            / coin['close'].iloc[-11]
         ) * 100
 
         btc_r = (
-            (btc['close'].iloc[-1] - btc['close'].iloc[-10])
-            / btc['close'].iloc[-10]
+            (btc['close'].iloc[-2] - btc['close'].iloc[-11])
+            / btc['close'].iloc[-11]
         ) * 100
 
         return round(coin_r - btc_r, 2)
@@ -731,10 +970,10 @@ def get_support_resistance(df, lookback=50):
 
     try:
 
-        if df is None or len(df) < lookback:
+        if df is None or len(df) < lookback + 1:
             return None, None
 
-        df = df.iloc[-lookback:]
+        df = df.iloc[-(lookback + 1):-1]
 
         highs = df['high']
         lows = df['low']
