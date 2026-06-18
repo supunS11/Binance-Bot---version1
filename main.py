@@ -13,6 +13,8 @@ from exchange import (
     cancel_remaining_orders,
     get_open_position_counts,
     get_open_position_snapshot,
+    get_open_position_details,
+    set_margin_type,
     setup_leverage,
     get_entry_price,
     get_mark_price,
@@ -69,6 +71,98 @@ def log_skip_summary(skip_reasons):
     log_info(f"SCAN SKIP SUMMARY: {summary}")
 
 
+def calculate_target_roi(entry_price, tp_price, side, leverage):
+    if not tp_price or entry_price <= 0:
+        return 0
+
+    if side == "BUY":
+        price_move_pct = (tp_price - entry_price) / entry_price * 100
+    else:
+        price_move_pct = (entry_price - tp_price) / entry_price * 100
+
+    return max(0, price_move_pct * leverage)
+
+
+def calculate_profit_protection_trigger(target_roi):
+    if (
+        config.PROFIT_PROTECTION_TRIGGER_TP_PCT > 0
+        and target_roi > 0
+    ):
+        return (
+            target_roi
+            * config.PROFIT_PROTECTION_TRIGGER_TP_PCT
+            / 100
+        )
+
+    return config.PROFIT_PROTECTION_TRIGGER_ROI
+
+
+def recover_untracked_positions(open_symbols):
+    position_details = get_open_position_details()
+    recovered_count = 0
+
+    for symbol in open_symbols:
+        if symbol in trade_times:
+            continue
+
+        position = position_details.get(symbol)
+
+        if not position:
+            continue
+
+        entry_price = position["entry_price"]
+        quantity = position["quantity"]
+
+        if entry_price <= 0 or quantity <= 0:
+            continue
+
+        side = position["side"]
+        tp_price = position.get("tp_price")
+        target_roi = calculate_target_roi(
+            entry_price,
+            tp_price,
+            side,
+            config.LEVERAGE
+        )
+        protection_trigger_roi = calculate_profit_protection_trigger(target_roi)
+        recovery_time = datetime.now()
+
+        trade_times[symbol] = {
+            "trade_id": (
+                f"{symbol}-{side}-RECOVERED-"
+                f"{recovery_time.strftime('%Y%m%d%H%M%S')}"
+            ),
+            "entry_time": recovery_time,
+            "entry_time_iso": recovery_time.isoformat(),
+            "side": side,
+            "confidence": "RECOVERED",
+            "leverage": config.LEVERAGE,
+            "entry_price": entry_price,
+            "quantity": quantity,
+            "tp_price": tp_price or "",
+            "sl_price": "",
+            "rr": "",
+            "target_roi": round(target_roi, 4),
+            "profit_protection_trigger_roi": round(
+                protection_trigger_roi,
+                4
+            ),
+            "peak_roi": 0,
+            "last_roi": 0,
+            "early_exit_reason": "RECOVERED_AFTER_RECONNECT",
+        }
+
+        log_warning(
+            f"{symbol} RECOVERED OPEN POSITION | "
+            f"SIDE={side} | QTY={quantity} | ENTRY={entry_price} | "
+            f"TP={tp_price if tp_price else 'UNKNOWN'}"
+        )
+        recovered_count += 1
+
+    if recovered_count:
+        log_warning(f"RECOVERED {recovered_count} OPEN POSITION(S)")
+
+
 def close_tracked_trade(symbol, reason):
     trade = trade_times.get(symbol)
 
@@ -90,6 +184,85 @@ def close_tracked_trade(symbol, reason):
 
     trade["early_exit_reason"] = reason
     return True
+
+
+def get_market_reversal_exit_reason(symbol, side):
+    try:
+        trend_df = get_klines(symbol, config.TREND_TIMEFRAME)
+
+        if trend_df is None or len(trend_df) < 250:
+            return None
+
+        trend_df = apply_indicators(trend_df)
+
+        if trend_df is None:
+            return None
+
+        latest = trend_df.iloc[-2]
+        prev = trend_df.iloc[-3]
+        structure = detect_market_structure(trend_df)
+        min_adx = getattr(config, "MARKET_REVERSAL_EXIT_MIN_ADX", 18)
+
+        if latest["adx"] < min_adx:
+            return None
+
+        btc_trend = "NONE"
+        if getattr(config, "MARKET_REVERSAL_EXIT_CONFIRM_BTC", False):
+            btc_trend = get_btc_trend()
+
+        bullish_reversal = (
+            latest["close"] > latest["ema20"]
+            and latest["ema20"] >= latest["ema50"]
+            and latest["close"] > prev["high"]
+            and (
+                structure["bullish_bos"]
+                or structure["bullish_choch"]
+                or structure["bullish_structure"]
+            )
+        )
+
+        bearish_reversal = (
+            latest["close"] < latest["ema20"]
+            and latest["ema20"] <= latest["ema50"]
+            and latest["close"] < prev["low"]
+            and (
+                structure["bearish_bos"]
+                or structure["bearish_choch"]
+                or structure["bearish_structure"]
+            )
+        )
+
+        if (
+            getattr(config, "MARKET_REVERSAL_EXIT_CONFIRM_BTC", False)
+            and bullish_reversal
+            and btc_trend != "BULLISH"
+        ):
+            bullish_reversal = False
+
+        if (
+            getattr(config, "MARKET_REVERSAL_EXIT_CONFIRM_BTC", False)
+            and bearish_reversal
+            and btc_trend != "BEARISH"
+        ):
+            bearish_reversal = False
+
+        if side == "SELL" and bullish_reversal:
+            return (
+                "MARKET REVERSAL EXIT SELL -> BULLISH | "
+                f"ADX={latest['adx']:.2f} | BTC={btc_trend}"
+            )
+
+        if side == "BUY" and bearish_reversal:
+            return (
+                "MARKET REVERSAL EXIT BUY -> BEARISH | "
+                f"ADX={latest['adx']:.2f} | BTC={btc_trend}"
+            )
+
+        return None
+
+    except Exception as e:
+        log_error(f"{symbol} MARKET REVERSAL CHECK ERROR: {e}")
+        return None
 
 
 def manage_open_trade(symbol):
@@ -123,6 +296,22 @@ def manage_open_trade(symbol):
         f"PEAK={peak_roi:.2f}% | PROTECT={trigger_roi:.2f}% | "
         f"MIN={duration_minutes:.1f}"
     )
+
+    if (
+        config.MARKET_REVERSAL_EXIT_ENABLED
+        and duration_minutes >= config.MARKET_REVERSAL_EXIT_MINUTES
+        and current_roi >= config.MARKET_REVERSAL_EXIT_MIN_ROI
+    ):
+        reversal_reason = get_market_reversal_exit_reason(
+            symbol,
+            trade["side"]
+        )
+
+        if reversal_reason:
+            return close_tracked_trade(
+                symbol,
+                f"{reversal_reason} | ROI {current_roi:.2f}%"
+            )
 
     if (
         config.EARLY_FLOW_EXIT_ENABLED
@@ -417,6 +606,7 @@ def run_bot():
 
         try:
             open_symbols, position_counts = get_open_position_snapshot()
+            recover_untracked_positions(open_symbols)
             btc_trend = "NONE"
             skip_reasons = {}
 
@@ -609,6 +799,14 @@ def run_bot():
                             record_skip(skip_reasons, "OPEN POSITION SAME FLOW")
                             continue
 
+                        if not config.CLOSE_ON_OPPOSITE_SIGNAL_ENABLED:
+                            log_warning(
+                                f"{symbol} opposite {signal} signal ignored | "
+                                f"keeping open {current_side} position for TP"
+                            )
+                            record_skip(skip_reasons, "OPEN POSITION OPPOSITE FLOW")
+                            continue
+
                         if close_tracked_trade(
                             symbol,
                             f"OPPOSITE FLOW {current_side} -> {signal}"
@@ -665,6 +863,8 @@ def run_bot():
                     # =========================
                     # POSITION LIMITS
                     # =========================
+                    _, fresh_position_counts = get_open_position_snapshot()
+                    position_counts = fresh_position_counts
                     counts = position_counts
 
                     if config.MAX_TOTAL_POSITIONS and counts['total'] >= config.MAX_TOTAL_POSITIONS:
@@ -887,8 +1087,12 @@ def run_bot():
                     log_info(f"{symbol} QTY: {quantity}")
 
                     # =========================
-                    # LEVERAGE
+                    # MARGIN / LEVERAGE
                     # =========================
+                    if not set_margin_type(symbol):
+                        record_skip(skip_reasons, "MARGIN TYPE FAILED")
+                        continue
+
                     if not setup_leverage(symbol, trade_leverage):
                         record_skip(skip_reasons, "LEVERAGE FAILED")
                         continue

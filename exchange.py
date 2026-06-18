@@ -46,10 +46,15 @@ def set_margin_type(symbol):
         )
 
         log_info(f"{symbol} Margin: {config.MARGIN_TYPE}")
+        return True
 
     except Exception as e:
         if "No need to change margin type" not in str(e):
             log_warning(str(e))
+            return False
+
+        log_info(f"{symbol} Margin already {config.MARGIN_TYPE}")
+        return True
 
 
 # =========================
@@ -263,6 +268,53 @@ def get_open_position_snapshot():
     except Exception as e:
         log_error(f"position snapshot error: {e}")
         return set(), {"total": 0, "buy": 0, "sell": 0}
+
+
+def get_open_position_details():
+
+    try:
+        positions = client.futures_position_information()
+        details = {}
+
+        for p in positions:
+            amt = float(p['positionAmt'])
+
+            if amt == 0:
+                continue
+
+            symbol = p['symbol']
+            side = "BUY" if amt > 0 else "SELL"
+            tp_price = None
+
+            try:
+                open_orders = client.futures_get_open_orders(symbol=symbol)
+
+                for order in open_orders:
+                    if order.get("type") == "TAKE_PROFIT_MARKET":
+                        stop_price = float(order.get("stopPrice", 0))
+
+                        if stop_price > 0:
+                            tp_price = stop_price
+                            break
+
+            except Exception as e:
+                log_warning(f"{symbol} TP recovery warning: {e}")
+
+            details[symbol] = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": abs(amt),
+                "entry_price": float(p.get('entryPrice', 0)),
+                "mark_price": float(p.get('markPrice', 0)),
+                "unrealized_pnl": float(p.get('unRealizedProfit', 0)),
+                "tp_price": tp_price,
+            }
+
+        return details
+
+    except Exception as e:
+        log_error(f"position detail recovery error: {e}")
+        return {}
 
 
 # =========================
@@ -807,14 +859,21 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
 
         # ================= VALIDATION ONLY =================
         if side == SIDE_BUY:
-            if tp_price <= market_price or sl_price >= market_price:
+            if tp_price <= market_price:
+                return False
+
+            if config.SL_ENABLED and sl_price >= market_price:
                 return False
         else:
-            if tp_price >= market_price or sl_price <= market_price:
+            if tp_price >= market_price:
+                return False
+
+            if config.SL_ENABLED and sl_price <= market_price:
                 return False
 
         log_info(
-            f"{symbol}\nENTRY: {entry_price}\nTP: {tp_price}\nSL: {sl_price}"
+            f"{symbol}\nENTRY: {entry_price}\nTP: {tp_price}\n"
+            f"SL: {sl_price if config.SL_ENABLED else 'DISABLED'}"
         )
 
         # TAKE PROFIT
@@ -830,16 +889,19 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
 
         time.sleep(2)
 
-        # STOP LOSS
-        client.futures_create_order(
-            symbol=symbol,
-            side=close_side,
-            type="STOP_MARKET",
-            stopPrice=sl_price,
-            closePosition=True,
-            workingType="MARK_PRICE",
-            priceProtect=True
-        )
+        if config.SL_ENABLED:
+            # STOP LOSS
+            client.futures_create_order(
+                symbol=symbol,
+                side=close_side,
+                type="STOP_MARKET",
+                stopPrice=sl_price,
+                closePosition=True,
+                workingType="MARK_PRICE",
+                priceProtect=True
+            )
+        else:
+            log_warning(f"{symbol} SL DISABLED | NO EXCHANGE STOP PLACED")
 
         time.sleep(2)
 
@@ -852,7 +914,10 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
             tp_price
         )
 
-        log_info(f"{symbol} TP/SL CREATED")
+        if config.SL_ENABLED:
+            log_info(f"{symbol} TP/SL CREATED")
+        else:
+            log_info(f"{symbol} TP CREATED | SL DISABLED")
 
         time.sleep(1)
         return True

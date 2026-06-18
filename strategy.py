@@ -483,6 +483,50 @@ def check_signal(
         candle_body = abs(entry["close"] - entry["open"])
         body_ratio = candle_body / candle_range if candle_range > 0 else 0
         min_body_ratio = get_config_float("MIN_SIGNAL_BODY_RATIO", 0.12)
+        min_close_position = get_config_float("MIN_SIGNAL_CLOSE_POSITION", 0.45)
+        max_rejection_wick_ratio = get_config_float(
+            "MAX_SIGNAL_REJECTION_WICK_RATIO",
+            0.55
+        )
+        min_momentum_atr = get_config_float("MIN_SIGNAL_MOMENTUM_ATR", 0.03)
+        upper_wick = entry["high"] - max(entry["open"], entry["close"])
+        lower_wick = min(entry["open"], entry["close"]) - entry["low"]
+        upper_wick_ratio = upper_wick / candle_range if candle_range > 0 else 0
+        lower_wick_ratio = lower_wick / candle_range if candle_range > 0 else 0
+        buy_close_position = (
+            (entry["close"] - entry["low"]) / candle_range
+            if candle_range > 0
+            else 0
+        )
+        sell_close_position = (
+            (entry["high"] - entry["close"]) / candle_range
+            if candle_range > 0
+            else 0
+        )
+        wick_filter_enabled = getattr(config, "SIGNAL_WICK_FILTER_ENABLED", True)
+        buy_wick_ok = (
+            not wick_filter_enabled
+            or upper_wick_ratio <= max_rejection_wick_ratio
+        )
+        sell_wick_ok = (
+            not wick_filter_enabled
+            or lower_wick_ratio <= max_rejection_wick_ratio
+        )
+        momentum_filter_enabled = getattr(
+            config,
+            "SIGNAL_MOMENTUM_FILTER_ENABLED",
+            True
+        )
+        buy_momentum_ok = (
+            not momentum_filter_enabled
+            or entry["close"] >= prev_entry["close"] + (entry["atr"] * min_momentum_atr)
+        )
+        sell_momentum_ok = (
+            not momentum_filter_enabled
+            or entry["close"] <= prev_entry["close"] - (entry["atr"] * min_momentum_atr)
+        )
+        buy_close_ok = buy_close_position >= min_close_position
+        sell_close_ok = sell_close_position >= min_close_position
         ema_slope = entry["ema20"] - prev_entry["ema20"]
         prev_ema_slope = prev_entry["ema20"] - prev2_entry["ema20"]
         slope_tolerance = entry["atr"] * get_config_float(
@@ -521,6 +565,9 @@ def check_signal(
         buy_score = add_score(buy_score, volume_ok, 1)
         buy_score = add_score(buy_score, not previous_buy_flow, 1)
         buy_score = add_score(buy_score, body_ratio >= min_body_ratio, 1)
+        buy_score = add_score(buy_score, buy_wick_ok, 1)
+        buy_score = add_score(buy_score, buy_close_ok, 1)
+        buy_score = add_score(buy_score, buy_momentum_ok, 1)
 
         sell_score = 0
         sell_score = add_score(sell_score, below_ema, 3)
@@ -532,6 +579,9 @@ def check_signal(
         sell_score = add_score(sell_score, volume_ok, 1)
         sell_score = add_score(sell_score, not previous_sell_flow, 1)
         sell_score = add_score(sell_score, body_ratio >= min_body_ratio, 1)
+        sell_score = add_score(sell_score, sell_wick_ok, 1)
+        sell_score = add_score(sell_score, sell_close_ok, 1)
+        sell_score = add_score(sell_score, sell_momentum_ok, 1)
 
         buy_valid = (
             above_ema
@@ -540,6 +590,9 @@ def check_signal(
             and buy_rsi_ok
             and buy_not_overheated
             and body_ratio >= min_body_ratio
+            and buy_wick_ok
+            and buy_close_ok
+            and buy_momentum_ok
         )
         sell_valid = (
             below_ema
@@ -548,10 +601,13 @@ def check_signal(
             and sell_rsi_ok
             and sell_not_overheated
             and body_ratio >= min_body_ratio
+            and sell_wick_ok
+            and sell_close_ok
+            and sell_momentum_ok
         )
 
-        buy_conf = score_to_confidence(buy_score, 14)
-        sell_conf = score_to_confidence(sell_score, 14)
+        buy_conf = score_to_confidence(buy_score, 17)
+        sell_conf = score_to_confidence(sell_score, 17)
 
         log_gate_state(
             "BUY FLOW",
@@ -560,6 +616,9 @@ def check_signal(
             candle=bullish_candle,
             rsi=buy_rsi_ok,
             body=body_ratio >= min_body_ratio,
+            wick=buy_wick_ok,
+            close=buy_close_ok,
+            momentum=buy_momentum_ok,
         )
         log_gate_state(
             "SELL FLOW",
@@ -568,11 +627,19 @@ def check_signal(
             candle=bearish_candle,
             rsi=sell_rsi_ok,
             body=body_ratio >= min_body_ratio,
+            wick=sell_wick_ok,
+            close=sell_close_ok,
+            momentum=sell_momentum_ok,
         )
 
         log_info(
             f"BUY conf: {buy_conf}% | SELL conf: {sell_conf}% | "
-            f"BODY: {body_ratio:.2f} | EMA SLOPE: {ema_slope:.8f}"
+            f"BODY: {body_ratio:.2f} | "
+            f"BUY_CLOSE_POS: {buy_close_position:.2f} | "
+            f"SELL_CLOSE_POS: {sell_close_position:.2f} | "
+            f"UPPER_WICK: {upper_wick_ratio:.2f} | "
+            f"LOWER_WICK: {lower_wick_ratio:.2f} | "
+            f"EMA SLOPE: {ema_slope:.8f}"
         )
 
         min_confidence = config.CONTINUATION_SIGNAL_THRESHOLD
