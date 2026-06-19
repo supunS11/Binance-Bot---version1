@@ -348,19 +348,21 @@ def get_price_precision(symbol):
 def get_entry_price(symbol):
 
     try:
-        time.sleep(2)
+        for attempt in range(5):
+            if attempt > 0:
+                time.sleep(0.4)
 
-        positions = client.futures_position_information(symbol=symbol)
+            positions = client.futures_position_information(symbol=symbol)
 
-        if not positions:
-            return None
+            if not positions:
+                continue
 
-        entry = float(positions[0].get('entryPrice', 0))
+            entry = float(positions[0].get('entryPrice', 0))
 
-        if entry <= 0:
-            return None
+            if entry > 0:
+                return abs(entry)
 
-        return abs(entry)
+        return None
 
     except Exception as e:
         log_error(f"{symbol} entry price error: {e}")
@@ -598,6 +600,179 @@ def calculate_static_roi_take_profit(entry_price, side, roi_percent, leverage=No
         return None
 
 
+def log_scalp_tp_reject(
+    reason,
+    entry_price,
+    sl_price,
+    side,
+    static_tp=None,
+    target=None,
+    risk=None,
+    reward=None,
+    min_reward=None,
+    support=None,
+    resistance=None,
+    symbol=None
+):
+    label = f"{symbol} SCALP TP REJECT" if symbol else "SCALP TP REJECT"
+
+    log_warning(
+        f"{label} | REASON={reason} | SIDE={side} | "
+        f"ENTRY={entry_price} | SL={sl_price} | STATIC_TP={static_tp} | "
+        f"TARGET={target} | RISK={risk} | REWARD={reward} | "
+        f"MIN_REWARD={min_reward} | SUPPORT={support} | "
+        f"RESISTANCE={resistance}"
+    )
+
+
+def calculate_scalp_take_profit(
+    entry_price,
+    sl_price,
+    side,
+    sr_df,
+    roi_percent,
+    min_rr=0.6,
+    leverage=None,
+    symbol=None
+):
+
+    try:
+
+        static_tp = calculate_static_roi_take_profit(
+            entry_price,
+            side,
+            roi_percent,
+            leverage=leverage
+        )
+
+        if static_tp is None:
+            log_scalp_tp_reject(
+                "STATIC_TP_NONE",
+                entry_price,
+                sl_price,
+                side,
+                static_tp=static_tp,
+                symbol=symbol
+            )
+            return None
+
+        risk = abs(entry_price - sl_price)
+
+        if risk <= 0:
+            log_scalp_tp_reject(
+                "INVALID_RISK",
+                entry_price,
+                sl_price,
+                side,
+                static_tp=static_tp,
+                risk=risk,
+                symbol=symbol
+            )
+            return None
+
+        min_reward = risk * min_rr
+        sr_buffer_pct = getattr(config, "SCALP_TP_SR_BUFFER_PCT", 0.04)
+        sr_buffer = entry_price * (sr_buffer_pct / 100)
+        support, resistance = None, None
+
+        if getattr(config, "SCALP_TP_RESPECT_SR", True):
+            support, resistance = get_support_resistance(sr_df)
+
+        if side == SIDE_BUY or side == "BUY":
+            target = static_tp
+
+            if (
+                resistance is not None
+                and entry_price < resistance < static_tp
+            ):
+                target = resistance - sr_buffer
+
+            reward = target - entry_price
+
+            if target <= entry_price:
+                log_scalp_tp_reject(
+                    "TARGET_NOT_ABOVE_ENTRY",
+                    entry_price,
+                    sl_price,
+                    side,
+                    static_tp=static_tp,
+                    target=target,
+                    risk=risk,
+                    reward=reward,
+                    min_reward=min_reward,
+                    support=support,
+                    resistance=resistance,
+                    symbol=symbol
+                )
+                return None
+
+            if reward < min_reward:
+                log_scalp_tp_reject(
+                    "REWARD_BELOW_MIN_RR",
+                    entry_price,
+                    sl_price,
+                    side,
+                    static_tp=static_tp,
+                    target=target,
+                    risk=risk,
+                    reward=reward,
+                    min_reward=min_reward,
+                    support=support,
+                    resistance=resistance,
+                    symbol=symbol
+                )
+                return None
+
+            return target
+
+        target = static_tp
+
+        if support is not None and static_tp < support < entry_price:
+            target = support + sr_buffer
+
+        reward = entry_price - target
+
+        if target >= entry_price:
+            log_scalp_tp_reject(
+                "TARGET_NOT_BELOW_ENTRY",
+                entry_price,
+                sl_price,
+                side,
+                static_tp=static_tp,
+                target=target,
+                risk=risk,
+                reward=reward,
+                min_reward=min_reward,
+                support=support,
+                resistance=resistance,
+                symbol=symbol
+            )
+            return None
+
+        if reward < min_reward:
+            log_scalp_tp_reject(
+                "REWARD_BELOW_MIN_RR",
+                entry_price,
+                sl_price,
+                side,
+                static_tp=static_tp,
+                target=target,
+                risk=risk,
+                reward=reward,
+                min_reward=min_reward,
+                support=support,
+                resistance=resistance,
+                symbol=symbol
+            )
+            return None
+
+        return target
+
+    except Exception as e:
+        log_error(f"SCALP TP ERROR: {e}")
+        return None
+
+
 def calculate_adaptive_take_profit(
     entry_price,
     sl_price,
@@ -830,9 +1005,6 @@ def place_native_trailing_stop(symbol, side, entry_price, quantity, tp_price):
 def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_price):
 
     try:
-
-        time.sleep(2)
-
         precision = get_price_precision(symbol)
 
         market_price = float(
@@ -855,20 +1027,34 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
 
             close_side = SIDE_BUY
 
-            time.sleep(1)
-
         # ================= VALIDATION ONLY =================
         if side == SIDE_BUY:
             if tp_price <= market_price:
+                log_warning(
+                    f"{symbol} TP/SL VALIDATION FAILED | "
+                    f"BUY TP={tp_price} <= MARKET={market_price}"
+                )
                 return False
 
             if config.SL_ENABLED and sl_price >= market_price:
+                log_warning(
+                    f"{symbol} TP/SL VALIDATION FAILED | "
+                    f"BUY SL={sl_price} >= MARKET={market_price}"
+                )
                 return False
         else:
             if tp_price >= market_price:
+                log_warning(
+                    f"{symbol} TP/SL VALIDATION FAILED | "
+                    f"SELL TP={tp_price} >= MARKET={market_price}"
+                )
                 return False
 
             if config.SL_ENABLED and sl_price <= market_price:
+                log_warning(
+                    f"{symbol} TP/SL VALIDATION FAILED | "
+                    f"SELL SL={sl_price} <= MARKET={market_price}"
+                )
                 return False
 
         log_info(
@@ -887,8 +1073,6 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
             priceProtect=True
         )
 
-        time.sleep(2)
-
         if config.SL_ENABLED:
             # STOP LOSS
             client.futures_create_order(
@@ -902,8 +1086,6 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
             )
         else:
             log_warning(f"{symbol} SL DISABLED | NO EXCHANGE STOP PLACED")
-
-        time.sleep(2)
 
         # TRAILING STOP
         place_native_trailing_stop(
@@ -919,7 +1101,6 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
         else:
             log_info(f"{symbol} TP CREATED | SL DISABLED")
 
-        time.sleep(1)
         return True
 
     except Exception as e:

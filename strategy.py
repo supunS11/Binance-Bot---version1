@@ -23,10 +23,39 @@ def get_structure_stop_loss(df, side):
         atr = candle["atr"]
         atr_mult = get_config_float("FLOW_SL_ATR_MULT", 1.2)
 
-        if side == "BUY":
-            return candle["close"] - (atr * atr_mult)
+        if atr <= 0:
+            return None
 
-        return candle["close"] + (atr * atr_mult)
+        if not getattr(config, "STRUCTURE_SL_ENABLED", True):
+            if side == "BUY":
+                return candle["close"] - (atr * atr_mult)
+
+            return candle["close"] + (atr * atr_mult)
+
+        lookback = get_config_int("STRUCTURE_SL_LOOKBACK", 8)
+        buffer_mult = get_config_float("STRUCTURE_SL_ATR_BUFFER_MULT", 0.25)
+        min_atr_mult = get_config_float("STRUCTURE_SL_MIN_ATR_MULT", 0.55)
+        max_atr_mult = get_config_float("STRUCTURE_SL_MAX_ATR_MULT", atr_mult)
+        buffer = atr * buffer_mult
+        recent = df.iloc[-(lookback + 1):-1]
+
+        if recent.empty:
+            recent = df.iloc[-3:-1]
+
+        if side == "BUY":
+            raw_sl = recent["low"].min() - buffer
+            min_distance_sl = candle["close"] - (atr * min_atr_mult)
+            max_distance_sl = candle["close"] - (atr * max_atr_mult)
+
+            sl_price = min(raw_sl, min_distance_sl)
+            return max(sl_price, max_distance_sl)
+
+        raw_sl = recent["high"].max() + buffer
+        min_distance_sl = candle["close"] + (atr * min_atr_mult)
+        max_distance_sl = candle["close"] + (atr * max_atr_mult)
+
+        sl_price = max(raw_sl, min_distance_sl)
+        return min(sl_price, max_distance_sl)
 
     except Exception as e:
         log_error(f"FLOW SL ERROR: {e}")
@@ -105,6 +134,20 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
 
         else:
             return False, "UNKNOWN SIGNAL"
+
+        support, resistance = get_support_resistance(trend_df)
+
+        if signal == "BUY" and resistance is not None and resistance > current_price:
+            room_r = (resistance - current_price) / risk
+
+            if room_r < min_sr_room_r:
+                return False, f"BUY RESISTANCE TOO CLOSE: {room_r:.2f}R"
+
+        if signal == "SELL" and support is not None and support < current_price:
+            room_r = (current_price - support) / risk
+
+            if room_r < min_sr_room_r:
+                return False, f"SELL SUPPORT TOO CLOSE: {room_r:.2f}R"
 
         return True, "ENTRY QUALITY OK"
 
@@ -444,6 +487,70 @@ def log_gate_state(name, **gates):
         log_info(f"{name} gates passed")
 
 
+def apply_market_context_score(side, score, confirm, trend, btc_trend, btc_corr, rs):
+    try:
+        confirm_adx = confirm["adx"]
+        sideways_adx = get_config_float("SIDEWAYS_ADX", 15)
+        trending_adx = get_config_float("TRENDING_ADX", 25)
+
+        if confirm_adx >= trending_adx:
+            score += 2
+        elif confirm_adx <= sideways_adx:
+            score -= 2
+
+        if side == "BUY":
+            if confirm["close"] > confirm["ema20"]:
+                score += 2
+            else:
+                score -= 1
+
+            if trend["close"] > trend["ema50"]:
+                score += 2
+            else:
+                score -= 1
+
+            if btc_corr is not None and btc_corr >= 0.65:
+                if btc_trend == "BULLISH":
+                    score += 2
+                elif btc_trend == "BEARISH":
+                    score -= 3
+
+            if rs is not None:
+                if rs > 2:
+                    score += 2
+                elif rs < -2:
+                    score -= 2
+
+        elif side == "SELL":
+            if confirm["close"] < confirm["ema20"]:
+                score += 2
+            else:
+                score -= 1
+
+            if trend["close"] < trend["ema50"]:
+                score += 2
+            else:
+                score -= 1
+
+            if btc_corr is not None and btc_corr >= 0.65:
+                if btc_trend == "BEARISH":
+                    score += 2
+                elif btc_trend == "BULLISH":
+                    score -= 3
+
+            if rs is not None:
+                if rs < -2:
+                    score += 2
+                elif rs > 2:
+                    score -= 2
+
+        return score
+
+    except Exception as e:
+        log_warning(f"MARKET CONTEXT SCORE ERROR: {e}")
+        return score
+
+
 # =========================================================
 # MAIN SIGNAL ENGINE
 # =========================================================
@@ -455,6 +562,8 @@ def check_signal(
         entry = entry_df.iloc[-2]
         prev_entry = entry_df.iloc[-3]
         prev2_entry = entry_df.iloc[-4]
+        confirm = confirm_df.iloc[-2]
+        trend = trend_df.iloc[-2]
         atr_pct = (entry["atr"] / entry["close"]) * 100
         ema20_distance = pct_distance(entry["close"], entry["ema20"])
         vwap_available = "vwap" in entry.index
@@ -606,8 +715,201 @@ def check_signal(
             and sell_momentum_ok
         )
 
-        buy_conf = score_to_confidence(buy_score, 17)
-        sell_conf = score_to_confidence(sell_score, 17)
+        buy_late, buy_late_reason = is_late_entry(
+            "BUY",
+            entry_df,
+            trend_df,
+            entry,
+            atr_pct
+        )
+        sell_late, sell_late_reason = is_late_entry(
+            "SELL",
+            entry_df,
+            trend_df,
+            entry,
+            atr_pct
+        )
+
+        if buy_late:
+            buy_score -= 3
+            log_info(f"BUY FLOW late penalty: {buy_late_reason}")
+
+        if sell_late:
+            sell_score -= 3
+            log_info(f"SELL FLOW late penalty: {sell_late_reason}")
+
+        buy_score = apply_market_context_score(
+            "BUY",
+            buy_score,
+            confirm,
+            trend,
+            btc_trend,
+            btc_corr,
+            rs
+        )
+        sell_score = apply_market_context_score(
+            "SELL",
+            sell_score,
+            confirm,
+            trend,
+            btc_trend,
+            btc_corr,
+            rs
+        )
+
+        buy_conf = score_to_confidence(buy_score, 25)
+        sell_conf = score_to_confidence(sell_score, 25)
+
+        entry_structure = detect_market_structure(entry_df)
+        trend_structure = detect_market_structure(trend_df)
+        bullish_sweep, bearish_sweep = detect_liquidity_sweep(entry_df)
+
+        prev_above_ema = prev_entry["close"] > prev_entry["ema20"]
+        prev_below_ema = prev_entry["close"] < prev_entry["ema20"]
+        prev_above_vwap = (
+            not vwap_available
+            or prev_entry["close"] > prev_entry["vwap"]
+        )
+        prev_below_vwap = (
+            not vwap_available
+            or prev_entry["close"] < prev_entry["vwap"]
+        )
+        buy_ema_reclaim = prev_below_ema and above_ema
+        sell_ema_reject = prev_above_ema and below_ema
+        buy_vwap_reclaim = prev_below_vwap and above_vwap
+        sell_vwap_reject = prev_above_vwap and below_vwap
+        buy_rsi_recovery = (
+            entry["rsi"] >= get_config_float("SCALP_BUY_MIN_RSI", 48)
+            and entry["rsi"] > prev_entry["rsi"]
+            and entry["rsi"] <= get_config_float("FLOW_BUY_MAX_RSI", 72)
+        )
+        sell_rsi_rejection = (
+            entry["rsi"] <= get_config_float("SCALP_SELL_MAX_RSI", 52)
+            and entry["rsi"] < prev_entry["rsi"]
+            and entry["rsi"] >= get_config_float("FLOW_SELL_MIN_RSI", 28)
+        )
+        require_reversal_structure = getattr(
+            config,
+            "SCALP_REQUIRE_STRUCTURE",
+            True
+        )
+
+        buy_reversal_trigger = (
+            bullish_sweep
+            or entry_structure["bullish_choch"]
+            or buy_ema_reclaim
+            or buy_vwap_reclaim
+        )
+        sell_reversal_trigger = (
+            bearish_sweep
+            or entry_structure["bearish_choch"]
+            or sell_ema_reject
+            or sell_vwap_reject
+        )
+        buy_reversal_structure_ok = (
+            not require_reversal_structure
+            or bullish_sweep
+            or entry_structure["bullish_choch"]
+            or trend_structure["bullish_choch"]
+            or buy_ema_reclaim
+            or buy_vwap_reclaim
+        )
+        sell_reversal_structure_ok = (
+            not require_reversal_structure
+            or bearish_sweep
+            or entry_structure["bearish_choch"]
+            or trend_structure["bearish_choch"]
+            or sell_ema_reject
+            or sell_vwap_reject
+        )
+
+        buy_reversal_score = 0
+        buy_reversal_score = add_score(buy_reversal_score, bullish_sweep, 4)
+        buy_reversal_score = add_score(
+            buy_reversal_score,
+            entry_structure["bullish_choch"] or trend_structure["bullish_choch"],
+            4
+        )
+        buy_reversal_score = add_score(buy_reversal_score, buy_ema_reclaim, 3)
+        buy_reversal_score = add_score(buy_reversal_score, buy_vwap_reclaim, 3)
+        buy_reversal_score = add_score(buy_reversal_score, above_ema, 2)
+        buy_reversal_score = add_score(buy_reversal_score, above_vwap, 2)
+        buy_reversal_score = add_score(buy_reversal_score, bullish_candle, 2)
+        buy_reversal_score = add_score(buy_reversal_score, buy_close_ok, 2)
+        buy_reversal_score = add_score(buy_reversal_score, buy_rsi_recovery, 2)
+        buy_reversal_score = add_score(buy_reversal_score, volume_ok, 1)
+        buy_reversal_score = add_score(
+            buy_reversal_score,
+            body_ratio >= min_body_ratio,
+            1
+        )
+        buy_reversal_score = add_score(buy_reversal_score, buy_wick_ok, 1)
+        buy_reversal_score = apply_market_context_score(
+            "BUY",
+            buy_reversal_score,
+            confirm,
+            trend,
+            btc_trend,
+            btc_corr,
+            rs
+        )
+
+        sell_reversal_score = 0
+        sell_reversal_score = add_score(sell_reversal_score, bearish_sweep, 4)
+        sell_reversal_score = add_score(
+            sell_reversal_score,
+            entry_structure["bearish_choch"] or trend_structure["bearish_choch"],
+            4
+        )
+        sell_reversal_score = add_score(sell_reversal_score, sell_ema_reject, 3)
+        sell_reversal_score = add_score(sell_reversal_score, sell_vwap_reject, 3)
+        sell_reversal_score = add_score(sell_reversal_score, below_ema, 2)
+        sell_reversal_score = add_score(sell_reversal_score, below_vwap, 2)
+        sell_reversal_score = add_score(sell_reversal_score, bearish_candle, 2)
+        sell_reversal_score = add_score(sell_reversal_score, sell_close_ok, 2)
+        sell_reversal_score = add_score(sell_reversal_score, sell_rsi_rejection, 2)
+        sell_reversal_score = add_score(sell_reversal_score, volume_ok, 1)
+        sell_reversal_score = add_score(
+            sell_reversal_score,
+            body_ratio >= min_body_ratio,
+            1
+        )
+        sell_reversal_score = add_score(sell_reversal_score, sell_wick_ok, 1)
+        sell_reversal_score = apply_market_context_score(
+            "SELL",
+            sell_reversal_score,
+            confirm,
+            trend,
+            btc_trend,
+            btc_corr,
+            rs
+        )
+
+        buy_reversal_valid = (
+            buy_reversal_trigger
+            and buy_reversal_structure_ok
+            and above_ema
+            and above_vwap
+            and bullish_candle
+            and buy_rsi_recovery
+            and body_ratio >= min_body_ratio
+            and buy_wick_ok
+            and buy_close_ok
+        )
+        sell_reversal_valid = (
+            sell_reversal_trigger
+            and sell_reversal_structure_ok
+            and below_ema
+            and below_vwap
+            and bearish_candle
+            and sell_rsi_rejection
+            and body_ratio >= min_body_ratio
+            and sell_wick_ok
+            and sell_close_ok
+        )
+
+        buy_reversal_conf = score_to_confidence(buy_reversal_score, 29)
+        sell_reversal_conf = score_to_confidence(sell_reversal_score, 29)
 
         log_gate_state(
             "BUY FLOW",
@@ -642,27 +944,77 @@ def check_signal(
             f"EMA SLOPE: {ema_slope:.8f}"
         )
 
+        log_gate_state(
+            "BUY REVERSAL",
+            trigger=buy_reversal_trigger,
+            structure=buy_reversal_structure_ok,
+            ema=above_ema,
+            vwap=above_vwap,
+            candle=bullish_candle,
+            rsi=buy_rsi_recovery,
+            body=body_ratio >= min_body_ratio,
+            wick=buy_wick_ok,
+            close=buy_close_ok,
+        )
+        log_gate_state(
+            "SELL REVERSAL",
+            trigger=sell_reversal_trigger,
+            structure=sell_reversal_structure_ok,
+            ema=below_ema,
+            vwap=below_vwap,
+            candle=bearish_candle,
+            rsi=sell_rsi_rejection,
+            body=body_ratio >= min_body_ratio,
+            wick=sell_wick_ok,
+            close=sell_close_ok,
+        )
+
+        log_info(
+            f"BUY reversal conf: {buy_reversal_conf}% | "
+            f"SELL reversal conf: {sell_reversal_conf}% | "
+            f"BULL_SWEEP: {bullish_sweep} | BEAR_SWEEP: {bearish_sweep} | "
+            f"BULL_CHOCH: {entry_structure['bullish_choch']} | "
+            f"BEAR_CHOCH: {entry_structure['bearish_choch']}"
+        )
+
         min_confidence = config.CONTINUATION_SIGNAL_THRESHOLD
+        reversal_min_confidence = config.REVERSAL_SIGNAL_THRESHOLD
         candidates = []
 
         if buy_valid and buy_conf >= min_confidence:
-            candidates.append(("BUY", buy_conf))
+            candidates.append(("BUY", "FLOW", buy_conf))
 
         if sell_valid and sell_conf >= min_confidence:
-            candidates.append(("SELL", sell_conf))
+            candidates.append(("SELL", "FLOW", sell_conf))
+
+        if buy_reversal_valid and buy_reversal_conf >= reversal_min_confidence:
+            candidates.append(("BUY", "REVERSAL", buy_reversal_conf))
+
+        if sell_reversal_valid and sell_reversal_conf >= reversal_min_confidence:
+            candidates.append(("SELL", "REVERSAL", sell_reversal_conf))
 
         if not candidates:
-            return build_signal_result(None, max(buy_conf, sell_conf), return_confidence)
+            best_conf = max(
+                buy_conf,
+                sell_conf,
+                buy_reversal_conf,
+                sell_reversal_conf
+            )
+            return build_signal_result(None, best_conf, return_confidence)
 
-        candidates.sort(key=lambda item: item[1], reverse=True)
+        candidates.sort(key=lambda item: item[2], reverse=True)
 
-        if len(candidates) > 1 and abs(candidates[0][1] - candidates[1][1]) < 10:
+        if (
+            len(candidates) > 1
+            and candidates[0][0] != candidates[1][0]
+            and abs(candidates[0][2] - candidates[1][2]) < 10
+        ):
             log_info("NO SIGNAL | COMPETING SIGNALS TOO CLOSE")
-            return build_signal_result(None, candidates[0][1], return_confidence)
+            return build_signal_result(None, candidates[0][2], return_confidence)
 
-        signal, confidence = candidates[0]
+        signal, mode, confidence = candidates[0]
 
-        log_info(f"FINAL FLOW {signal} CONFIDENCE: {confidence}")
+        log_info(f"FINAL {mode} {signal} CONFIDENCE: {confidence}")
         return build_signal_result(signal, confidence, return_confidence)
 
     except Exception as e:

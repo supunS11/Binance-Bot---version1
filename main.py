@@ -23,10 +23,9 @@ from exchange import (
     get_realized_pnl_since,
     get_position_metrics,
     get_btc_trend,
-    get_btc_correlation,
-    get_relative_strength,
     calculate_rr_take_profit,
     calculate_static_roi_take_profit,
+    calculate_scalp_take_profit,
     calculate_adaptive_take_profit,
     validate_min_notional,
     close_market_position
@@ -71,6 +70,86 @@ def log_skip_summary(skip_reasons):
     log_info(f"SCAN SKIP SUMMARY: {summary}")
 
 
+def get_btc_context_df():
+    try:
+        btc_df = get_klines("BTCUSDT", config.TREND_TIMEFRAME, config.KLINE_LIMIT)
+
+        if btc_df is None or len(btc_df) < 50:
+            return None
+
+        return apply_indicators(btc_df)
+
+    except Exception as e:
+        log_error(f"BTC CONTEXT DATA ERROR: {e}")
+        return None
+
+
+def get_btc_trend_from_df(btc_df):
+    try:
+        if btc_df is None or len(btc_df) < 2:
+            return "NONE"
+
+        btc = btc_df.iloc[-2]
+
+        if btc["close"] > btc["ema50"]:
+            return "BULLISH"
+
+        if btc["close"] < btc["ema50"]:
+            return "BEARISH"
+
+        return "NEUTRAL"
+
+    except Exception as e:
+        log_error(f"BTC CONTEXT TREND ERROR: {e}")
+        return "NONE"
+
+
+def calculate_btc_context_metrics(symbol, trend_df, btc_df):
+    try:
+        if btc_df is None or trend_df is None:
+            return 0, 0
+
+        if symbol == "BTCUSDT":
+            return 1.0, 0
+
+        coin_ret = trend_df["close"].iloc[:-1].pct_change().dropna()
+        btc_ret = btc_df["close"].iloc[:-1].pct_change().dropna()
+        min_len = min(len(coin_ret), len(btc_ret), 99)
+
+        if min_len < 20:
+            corr = 0
+        else:
+            corr = coin_ret.tail(min_len).corr(btc_ret.tail(min_len))
+
+            if corr != corr:
+                corr = 0
+
+        if len(trend_df) < 11 or len(btc_df) < 11:
+            rs = 0
+        else:
+            coin_base = trend_df["close"].iloc[-11]
+            btc_base = btc_df["close"].iloc[-11]
+
+            if coin_base <= 0 or btc_base <= 0:
+                rs = 0
+            else:
+                coin_r = (
+                    (trend_df["close"].iloc[-2] - coin_base)
+                    / coin_base
+                ) * 100
+                btc_r = (
+                    (btc_df["close"].iloc[-2] - btc_base)
+                    / btc_base
+                ) * 100
+                rs = coin_r - btc_r
+
+        return round(float(corr), 2), round(float(rs), 2)
+
+    except Exception as e:
+        log_error(f"{symbol} BTC CONTEXT METRICS ERROR: {e}")
+        return 0, 0
+
+
 def calculate_target_roi(entry_price, tp_price, side, leverage):
     if not tp_price or entry_price <= 0:
         return 0
@@ -95,6 +174,222 @@ def calculate_profit_protection_trigger(target_roi):
         )
 
     return config.PROFIT_PROTECTION_TRIGGER_ROI
+
+
+def classify_realized_pnl(realized_pnl):
+    if realized_pnl is None:
+        return "UNKNOWN"
+
+    if realized_pnl > 0:
+        return "WIN"
+
+    if realized_pnl < 0:
+        return "LOSS"
+
+    return "BREAKEVEN"
+
+
+def record_untracked_protection_close(
+    symbol,
+    signal,
+    quantity,
+    entry_time,
+    reason,
+    entry_price=None,
+    tp_price=None,
+    sl_price=None,
+    rr=None,
+    setup_snapshot=None,
+    trade_leverage=None
+):
+    exit_time = datetime.now()
+    realized_pnl = get_realized_pnl_since(symbol, entry_time)
+    outcome = classify_realized_pnl(realized_pnl)
+    exit_price = get_mark_price(symbol) or ""
+    leverage = trade_leverage if trade_leverage is not None else config.LEVERAGE
+    target_roi = 0
+
+    if entry_price and tp_price:
+        target_roi = calculate_target_roi(
+            entry_price,
+            tp_price,
+            signal,
+            leverage
+        )
+
+    event = {}
+
+    if setup_snapshot:
+        event.update(setup_snapshot)
+
+    event.update({
+        "event": "PROTECTION_CLOSE",
+        "trade_id": (
+            f"{symbol}-{signal}-PROTECTION-"
+            f"{entry_time.strftime('%Y%m%d%H%M%S')}"
+        ),
+        "symbol": symbol,
+        "side": signal,
+        "time": exit_time.isoformat(),
+        "entry_time": entry_time.isoformat(),
+        "exit_time": exit_time.isoformat(),
+        "duration_seconds": int((exit_time - entry_time).total_seconds()),
+        "entry_price": entry_price or "",
+        "exit_price": exit_price,
+        "quantity": quantity,
+        "tp_price": tp_price or "",
+        "sl_price": sl_price or "",
+        "rr": round(rr, 4) if isinstance(rr, (int, float)) else "",
+        "target_roi": round(target_roi, 4),
+        "profit_protection_trigger_roi": round(
+            calculate_profit_protection_trigger(target_roi),
+            4
+        ),
+        "realized_pnl": realized_pnl,
+        "outcome": outcome,
+        "confidence": (
+            setup_snapshot.get("confidence", "")
+            if setup_snapshot else ""
+        ),
+        "leverage": leverage,
+        "early_exit_reason": reason,
+    })
+
+    append_trade_event(event)
+
+
+def close_untracked_position(
+    symbol,
+    entry_order_side,
+    signal,
+    quantity,
+    entry_time,
+    reason,
+    entry_price=None,
+    tp_price=None,
+    sl_price=None,
+    rr=None,
+    setup_snapshot=None,
+    trade_leverage=None
+):
+    close_market_position(symbol, entry_order_side, quantity)
+    record_untracked_protection_close(
+        symbol,
+        signal,
+        quantity,
+        entry_time,
+        reason,
+        entry_price=entry_price,
+        tp_price=tp_price,
+        sl_price=sl_price,
+        rr=rr,
+        setup_snapshot=setup_snapshot,
+        trade_leverage=trade_leverage
+    )
+
+
+def calculate_post_fill_tp_sl_plan(
+    symbol,
+    signal,
+    entry_price,
+    sl_price,
+    trend_df,
+    trade_leverage
+):
+    mode = "STRUCTURE_RR"
+
+    if config.STATIC_TP_ENABLED:
+        tp_price = calculate_scalp_take_profit(
+            entry_price,
+            sl_price,
+            signal,
+            trend_df,
+            config.STATIC_TP_ROI,
+            min_rr=config.MIN_TRADE_RR,
+            leverage=trade_leverage,
+            symbol=symbol
+        )
+        mode = "SCALP_SR"
+
+        if tp_price is None:
+            tp_price = calculate_static_roi_take_profit(
+                entry_price,
+                signal,
+                config.STATIC_TP_ROI,
+                leverage=trade_leverage
+            )
+            mode = "STATIC_FALLBACK"
+
+            if tp_price is not None:
+                log_warning(
+                    f"{symbol} TP FALLBACK | "
+                    f"SR-aware TP invalid after fill; using fixed ROI TP"
+                )
+    else:
+        if config.ADAPTIVE_TP_ENABLED:
+            tp_price = calculate_adaptive_take_profit(
+                entry_price,
+                sl_price,
+                signal,
+                trend_df,
+                rr=config.RR_TAKE_PROFIT,
+                min_rr=config.MIN_TRADE_RR,
+                max_roi=config.ADAPTIVE_TP_MAX_ROI,
+                leverage=trade_leverage
+            )
+            mode = "ADAPTIVE"
+        else:
+            tp_price = calculate_rr_take_profit(
+                entry_price,
+                sl_price,
+                signal,
+                rr=config.RR_TAKE_PROFIT
+            )
+
+    if tp_price is None:
+        log_warning(f"{symbol} INVALID TP/SL | NO TP PRICE")
+        return None
+
+    final_sl_price = tighten_stop_loss_to_final_rr(
+        symbol,
+        signal,
+        entry_price,
+        tp_price,
+        sl_price
+    )
+
+    if not validate_tp_sl_direction(
+        symbol,
+        signal,
+        entry_price,
+        tp_price,
+        final_sl_price
+    ):
+        return None
+
+    risk = abs(entry_price - final_sl_price)
+    reward = abs(tp_price - entry_price)
+
+    if risk <= 0:
+        log_warning(f"{symbol} INVALID RISK")
+        return None
+
+    rr = reward / risk
+    sl_roi = (risk / entry_price) * trade_leverage * 100
+
+    if rr < config.MIN_TRADE_RR:
+        log_warning(f"{symbol} RR TOO LOW AFTER FINAL SL: {rr:.2f}")
+        return None
+
+    return {
+        "mode": mode,
+        "tp_price": tp_price,
+        "sl_price": final_sl_price,
+        "risk": risk,
+        "reward": reward,
+        "rr": rr,
+        "sl_roi": sl_roi,
+    }
 
 
 def recover_untracked_positions(open_symbols):
@@ -607,7 +902,8 @@ def run_bot():
         try:
             open_symbols, position_counts = get_open_position_snapshot()
             recover_untracked_positions(open_symbols)
-            btc_trend = "NONE"
+            btc_context_df = get_btc_context_df()
+            btc_trend = get_btc_trend_from_df(btc_context_df)
             skip_reasons = {}
 
             for symbol in config.SYMBOLS:
@@ -740,8 +1036,11 @@ def run_bot():
                     # =========================
                     # BTC CONTEXT
                     # =========================
-                    btc_corr = 0
-                    rs = 0
+                    btc_corr, rs = calculate_btc_context_metrics(
+                        symbol,
+                        trend_df,
+                        btc_context_df
+                    )
 
                     log_info(f"{symbol} BTC CORR: {btc_corr}")
                     log_info(f"BTC TREND: {btc_trend}")
@@ -1005,11 +1304,15 @@ def run_bot():
                     )
 
                     if config.STATIC_TP_ENABLED:
-                        pre_trade_tp_price = calculate_static_roi_take_profit(
+                        pre_trade_tp_price = calculate_scalp_take_profit(
                             current_price,
+                            sl_price,
                             signal,
+                            trend_df,
                             config.STATIC_TP_ROI,
-                            leverage=trade_leverage
+                            min_rr=config.MIN_TRADE_RR,
+                            leverage=trade_leverage,
+                            symbol=symbol
                         )
                     else:
                         if config.ADAPTIVE_TP_ENABLED:
@@ -1048,10 +1351,7 @@ def run_bot():
 
                     pre_trade_rr = pre_trade_reward / pre_trade_risk
 
-                    if (
-                        pre_trade_rr < config.MIN_TRADE_RR
-                        and not config.STATIC_TP_ENABLED
-                    ):
+                    if pre_trade_rr < config.MIN_TRADE_RR:
                         log_warning(
                             f"{symbol} SKIP | PRE-TRADE RR TOO LOW: "
                             f"{pre_trade_rr:.2f}"
@@ -1112,6 +1412,7 @@ def run_bot():
                     # PLACE ORDER
                     # =========================
                     side = SIDE_BUY if signal == "BUY" else SIDE_SELL
+                    order_time = datetime.now()
 
                     order = place_market_order(symbol, side, quantity)
 
@@ -1119,108 +1420,63 @@ def run_bot():
                         record_skip(skip_reasons, "ORDER FAILED")
                         continue
 
-                    time.sleep(2)
-
                     entry_price = get_entry_price(symbol)
 
                     if not entry_price:
                         log_warning(f"{symbol} ENTRY PRICE NOT FOUND")
+                        close_untracked_position(
+                            symbol,
+                            side,
+                            signal,
+                            quantity,
+                            order_time,
+                            "ENTRY_PRICE_NOT_FOUND",
+                            setup_snapshot=setup_snapshot,
+                            trade_leverage=trade_leverage
+                        )
                         record_skip(skip_reasons, "ENTRY PRICE NOT FOUND")
                         continue
 
-                    if config.STATIC_TP_ENABLED:
-
-                        tp_price = calculate_static_roi_take_profit(
-                            entry_price,
-                            signal,
-                            config.STATIC_TP_ROI,
-                            leverage=trade_leverage
-                        )
-
-                        log_info(
-                            f"{symbol} STATIC TP MODE | "
-                            f"ROI={config.STATIC_TP_ROI}% | "
-                            f"LEVERAGE={trade_leverage}x"
-                        )
-
-                    else:
-
-                        if config.ADAPTIVE_TP_ENABLED:
-                            tp_price = calculate_adaptive_take_profit(
-                                entry_price,
-                                sl_price,
-                                signal,
-                                trend_df,
-                                rr=config.RR_TAKE_PROFIT,
-                                min_rr=config.MIN_TRADE_RR,
-                                max_roi=config.ADAPTIVE_TP_MAX_ROI,
-                                leverage=trade_leverage
-                            )
-                        else:
-                            tp_price = calculate_rr_take_profit(
-                                entry_price,
-                                sl_price,
-                                signal,
-                                rr=config.RR_TAKE_PROFIT
-                            )
-
-                        if config.ADAPTIVE_TP_ENABLED:
-                            log_info(
-                                f"{symbol} ADAPTIVE TP MODE | "
-                                f"BASE_RR={config.RR_TAKE_PROFIT} | "
-                                f"MIN_RR={config.MIN_TRADE_RR} | "
-                                f"MAX_ROI={config.ADAPTIVE_TP_MAX_ROI}%"
-                            )
-                        else:
-                            log_info(
-                                f"{symbol} STRUCTURE/RR TP MODE | "
-                                f"RR={config.RR_TAKE_PROFIT}"
-                            )
-
-                    if tp_price is None:
-                        log_warning(f"{symbol} INVALID TP/SL")
-                        close_market_position(symbol, side, quantity)
-                        record_skip(skip_reasons, "INVALID TP/SL")
-                        continue
-
-                    sl_price = tighten_stop_loss_to_final_rr(
+                    tp_sl_plan = calculate_post_fill_tp_sl_plan(
                         symbol,
                         signal,
                         entry_price,
-                        tp_price,
-                        sl_price
+                        sl_price,
+                        trend_df,
+                        trade_leverage
                     )
 
-                    if not validate_tp_sl_direction(
-                        symbol,
-                        signal,
-                        entry_price,
-                        tp_price,
-                        sl_price
-                    ):
-                        close_market_position(symbol, side, quantity)
-                        record_skip(skip_reasons, "INVALID TP/SL DIRECTION")
+                    if tp_sl_plan is None:
+                        log_warning(
+                            f"{symbol} INVALID TP/SL AFTER FILL | "
+                            f"CLOSING POSITION"
+                        )
+                        close_untracked_position(
+                            symbol,
+                            side,
+                            signal,
+                            quantity,
+                            order_time,
+                            "INVALID_TP_SL_AFTER_FILL",
+                            entry_price=entry_price,
+                            setup_snapshot=setup_snapshot,
+                            trade_leverage=trade_leverage
+                        )
+                        record_skip(skip_reasons, "INVALID TP/SL AFTER FILL")
                         continue
 
-                    risk = abs(entry_price - sl_price)
-                    reward = abs(tp_price - entry_price)
+                    tp_price = tp_sl_plan["tp_price"]
+                    sl_price = tp_sl_plan["sl_price"]
+                    risk = tp_sl_plan["risk"]
+                    reward = tp_sl_plan["reward"]
+                    rr = tp_sl_plan["rr"]
+                    sl_roi = tp_sl_plan["sl_roi"]
 
-                    if risk <= 0:
-                        log_warning(f"{symbol} INVALID RISK")
-                        close_market_position(symbol, side, quantity)
-                        record_skip(skip_reasons, "INVALID RISK")
-                        continue
-
-                    rr = reward / risk
-                    sl_roi = (risk / entry_price) * trade_leverage * 100
-
-                    log_info(f"{symbol} RR: {rr:.2f}")
-
-                    if rr < config.MIN_TRADE_RR and not config.STATIC_TP_ENABLED:
-                        log_warning(f"{symbol} RR TOO LOW: {rr:.2f}")
-                        close_market_position(symbol, side, quantity)
-                        record_skip(skip_reasons, "RR TOO LOW")
-                        continue
+                    log_info(
+                        f"{symbol} TP MODE={tp_sl_plan['mode']} | "
+                        f"RR={rr:.2f} | SL_ROI={sl_roi:.2f}% | "
+                        f"LEVERAGE={trade_leverage}x"
+                    )
 
                     # =========================
                     # PLACE TP/SL
@@ -1239,14 +1495,28 @@ def run_bot():
                         log_error(
                             f"{symbol} PROTECTION FAILED | CLOSING POSITION"
                         )
-                        close_market_position(symbol, side, quantity)
+                        cancel_remaining_orders(symbol)
+                        close_untracked_position(
+                            symbol,
+                            side,
+                            signal,
+                            quantity,
+                            order_time,
+                            "PROTECTION_ORDER_FAILED",
+                            entry_price=entry_price,
+                            tp_price=tp_price,
+                            sl_price=sl_price,
+                            rr=rr,
+                            setup_snapshot=setup_snapshot,
+                            trade_leverage=trade_leverage
+                        )
                         record_skip(skip_reasons, "PROTECTION FAILED")
                         continue
 
                     # =========================
                     # STORE TRADE
                     # =========================
-                    entry_time = datetime.now()
+                    entry_time = order_time
                     trade_id = (
                         f"{symbol}-{signal}-"
                         f"{entry_time.strftime('%Y%m%d%H%M%S')}"
