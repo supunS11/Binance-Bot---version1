@@ -6,18 +6,19 @@ exchange_info = client.futures_exchange_info()
 
 symbols = []
 
-for s in exchange_info['symbols']:
+for s in exchange_info["symbols"]:
 
     # ONLY USDT PERPETUALS
     if (
-        s['contractType'] == 'PERPETUAL'
-        and s['quoteAsset'] == 'USDT'
-        and s['status'] == 'TRADING'
+        s["contractType"] == "PERPETUAL"
+        and s["quoteAsset"] == "USDT"
+        and s["status"] == "TRADING"
     ):
 
-        symbols.append(s['symbol'])
+        symbols.append(s["symbol"])
 
 # PRINT AS SINGLE LINE
 print(",".join(map(str.strip, symbols)))
 # TOTAL COUNT
 print(f"\nTOTAL COINS: {len(symbols)}")
+print(f".\binance_ai_bot\venv\Scripts\python.exe .\binance_ai_bot\main.py")

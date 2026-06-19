@@ -46,6 +46,8 @@ FIELDS = [
     "peak_roi",
     "last_roi",
     "last_unrealized_pnl",
+    "sl_management_stage",
+    "sl_move_count",
     "early_exit_reason",
 ]
 

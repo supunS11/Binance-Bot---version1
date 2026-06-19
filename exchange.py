@@ -285,6 +285,7 @@ def get_open_position_details():
             symbol = p['symbol']
             side = "BUY" if amt > 0 else "SELL"
             tp_price = None
+            sl_price = None
 
             try:
                 open_orders = client.futures_get_open_orders(symbol=symbol)
@@ -295,10 +296,15 @@ def get_open_position_details():
 
                         if stop_price > 0:
                             tp_price = stop_price
-                            break
+
+                    if order.get("type") == "STOP_MARKET":
+                        stop_price = float(order.get("stopPrice", 0))
+
+                        if stop_price > 0:
+                            sl_price = stop_price
 
             except Exception as e:
-                log_warning(f"{symbol} TP recovery warning: {e}")
+                log_warning(f"{symbol} TP/SL recovery warning: {e}")
 
             details[symbol] = {
                 "symbol": symbol,
@@ -308,6 +314,7 @@ def get_open_position_details():
                 "mark_price": float(p.get('markPrice', 0)),
                 "unrealized_pnl": float(p.get('unRealizedProfit', 0)),
                 "tp_price": tp_price,
+                "sl_price": sl_price,
             }
 
         return details
@@ -1105,6 +1112,80 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
 
     except Exception as e:
         log_error(f"{symbol} TP/SL error: {e}")
+        return False
+
+
+def replace_stop_loss(symbol, side, new_sl_price):
+
+    try:
+        if not config.SL_ENABLED:
+            log_warning(f"{symbol} SL REPLACE SKIP | SL DISABLED")
+            return False
+
+        precision = get_price_precision(symbol)
+        market_price = float(
+            client.futures_mark_price(symbol=symbol)['markPrice']
+        )
+        new_sl_price = round(new_sl_price, precision)
+
+        if side == SIDE_BUY or side == "BUY":
+            close_side = SIDE_SELL
+
+            if new_sl_price >= market_price:
+                log_warning(
+                    f"{symbol} SL REPLACE SKIP | "
+                    f"BUY NEW_SL={new_sl_price} >= MARKET={market_price}"
+                )
+                return False
+        else:
+            close_side = SIDE_BUY
+
+            if new_sl_price <= market_price:
+                log_warning(
+                    f"{symbol} SL REPLACE SKIP | "
+                    f"SELL NEW_SL={new_sl_price} <= MARKET={market_price}"
+                )
+                return False
+
+        open_orders = client.futures_get_open_orders(symbol=symbol)
+        old_stop_ids = [
+            order.get("orderId")
+            for order in open_orders
+            if order.get("type") == "STOP_MARKET"
+        ]
+
+        new_order = client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type="STOP_MARKET",
+            stopPrice=new_sl_price,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            priceProtect=True
+        )
+        new_order_id = new_order.get("orderId")
+
+        for order_id in old_stop_ids:
+            if not order_id or order_id == new_order_id:
+                continue
+
+            try:
+                client.futures_cancel_order(symbol=symbol, orderId=order_id)
+                log_info(f"{symbol} OLD SL CANCELED | ORDER_ID={order_id}")
+            except Exception as e:
+                log_warning(
+                    f"{symbol} OLD SL CANCEL WARNING | "
+                    f"ORDER_ID={order_id} | {e}"
+                )
+
+        log_warning(
+            f"{symbol} SL REPLACED | SIDE={side} | "
+            f"NEW_SL={new_sl_price} | MARKET={market_price}"
+        )
+        return True
+
+    except Exception as e:
+        log_error(f"{symbol} SL replace error: {e}")
         return False
 
 

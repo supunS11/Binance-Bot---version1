@@ -1,3 +1,5 @@
+import json
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -28,7 +30,8 @@ from exchange import (
     calculate_scalp_take_profit,
     calculate_adaptive_take_profit,
     validate_min_notional,
-    close_market_position
+    close_market_position,
+    replace_stop_loss
 )
 
 from indicators import apply_indicators
@@ -48,6 +51,8 @@ from trade_journal import append_trade_event
 trade_times = {}
 cooldowns = {}
 symbol_cooldowns = {}
+
+STATE_DATETIME_FIELDS = {"entry_time"}
 
 
 def record_skip(skip_reasons, reason):
@@ -187,6 +192,284 @@ def classify_realized_pnl(realized_pnl):
         return "LOSS"
 
     return "BREAKEVEN"
+
+
+def safe_float(value, default=0):
+    try:
+        if value in (None, ""):
+            return default
+
+        return float(value)
+
+    except (TypeError, ValueError):
+        return default
+
+
+def calculate_sl_price_from_roi(entry_price, side, lock_roi, leverage):
+    if entry_price <= 0 or leverage <= 0:
+        return None
+
+    price_move_pct = (lock_roi / leverage) / 100
+
+    if side == "BUY":
+        return entry_price * (1 + price_move_pct)
+
+    return entry_price * (1 - price_move_pct)
+
+
+def infer_exchange_close_reason(trade, outcome):
+    existing_reason = trade.get("early_exit_reason")
+
+    if existing_reason:
+        return existing_reason
+
+    sl_stage = trade.get("sl_management_stage", "")
+
+    if outcome == "LOSS":
+        if sl_stage == "PROFIT_LOCK":
+            return "PROFIT_LOCK_SL_HIT"
+
+        if sl_stage == "BREAKEVEN":
+            return "BREAKEVEN_SL_HIT"
+
+        return "SL_HIT"
+
+    if outcome in ("WIN", "BREAKEVEN"):
+        if sl_stage == "PROFIT_LOCK":
+            return "PROFIT_LOCK_SL_OR_TP_HIT"
+
+        if sl_stage == "BREAKEVEN":
+            return "BREAKEVEN_SL_OR_TP_HIT"
+
+        return "TP_HIT"
+
+    return ""
+
+
+def get_open_trades_state_path():
+    return getattr(
+        config,
+        "OPEN_TRADES_STATE_PATH",
+        "logs/open_trades_state.json"
+    )
+
+
+def parse_state_datetime(value):
+    if isinstance(value, datetime):
+        return value
+
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def serialize_state_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def serialize_trade_for_state(trade):
+    return {
+        key: serialize_state_value(value)
+        for key, value in trade.items()
+    }
+
+
+def normalize_trade_from_state(symbol, trade):
+    if not isinstance(trade, dict):
+        return None
+
+    normalized = trade.copy()
+    entry_time = parse_state_datetime(
+        normalized.get("entry_time")
+        or normalized.get("entry_time_iso")
+    )
+
+    if entry_time is None:
+        log_warning(
+            f"{symbol} STATE LOAD SKIP | INVALID ENTRY TIME"
+        )
+        return None
+
+    normalized["symbol"] = normalized.get("symbol", symbol)
+    normalized["entry_time"] = entry_time
+    normalized["entry_time_iso"] = entry_time.isoformat()
+    normalized.setdefault("peak_roi", 0)
+    normalized.setdefault("last_roi", 0)
+    normalized.setdefault("last_unrealized_pnl", "")
+    normalized.setdefault("sl_management_stage", "")
+    normalized.setdefault("sl_move_count", 0)
+    normalized.setdefault("early_exit_reason", "")
+
+    return normalized
+
+
+def load_open_trade_state():
+    path = get_open_trades_state_path()
+
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return 0
+
+        with open(path, "r", encoding="utf-8") as state_file:
+            payload = json.load(state_file)
+
+        raw_trades = payload.get("trades", {})
+
+        if not isinstance(raw_trades, dict):
+            log_warning("OPEN TRADE STATE LOAD SKIP | INVALID FORMAT")
+            return 0
+
+        loaded = 0
+
+        for symbol, raw_trade in raw_trades.items():
+            trade = normalize_trade_from_state(symbol, raw_trade)
+
+            if trade is None:
+                continue
+
+            trade_times[symbol] = trade
+            loaded += 1
+
+        if loaded:
+            log_warning(
+                f"OPEN TRADE STATE LOADED | COUNT={loaded} | PATH={path}"
+            )
+
+        return loaded
+
+    except Exception as e:
+        log_error(f"OPEN TRADE STATE LOAD ERROR: {e}")
+        return 0
+
+
+def save_open_trade_state():
+    path = get_open_trades_state_path()
+
+    try:
+        folder = os.path.dirname(path)
+
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+
+        payload = {
+            "saved_at": datetime.now().isoformat(),
+            "trades": {
+                symbol: serialize_trade_for_state(trade)
+                for symbol, trade in sorted(trade_times.items())
+            }
+        }
+        tmp_path = f"{path}.tmp"
+
+        with open(tmp_path, "w", encoding="utf-8") as state_file:
+            json.dump(payload, state_file, indent=2, sort_keys=True)
+
+        os.replace(tmp_path, path)
+        return True
+
+    except Exception as e:
+        log_error(f"OPEN TRADE STATE SAVE ERROR: {e}")
+        return False
+
+
+def update_trade_field(trade, key, value):
+    if value in (None, ""):
+        return False
+
+    if trade.get(key) == value:
+        return False
+
+    trade[key] = value
+    return True
+
+
+def sync_open_trade_state(open_symbols):
+    if not trade_times:
+        return
+
+    try:
+        position_details = get_open_position_details()
+        changed = False
+
+        for symbol in list(trade_times):
+            if symbol not in open_symbols:
+                continue
+
+            position = position_details.get(symbol)
+
+            if not position:
+                continue
+
+            trade = trade_times[symbol]
+            changed = update_trade_field(
+                trade,
+                "side",
+                position.get("side")
+            ) or changed
+            changed = update_trade_field(
+                trade,
+                "quantity",
+                position.get("quantity")
+            ) or changed
+            changed = update_trade_field(
+                trade,
+                "entry_price",
+                position.get("entry_price")
+            ) or changed
+            changed = update_trade_field(
+                trade,
+                "tp_price",
+                position.get("tp_price")
+            ) or changed
+            changed = update_trade_field(
+                trade,
+                "sl_price",
+                position.get("sl_price")
+            ) or changed
+
+            target_roi = safe_float(trade.get("target_roi"), 0)
+            tp_price = safe_float(trade.get("tp_price"), 0)
+            entry_price = safe_float(trade.get("entry_price"), 0)
+            leverage = safe_float(trade.get("leverage"), config.LEVERAGE)
+            side = trade.get("side")
+
+            if target_roi <= 0 and tp_price > 0 and entry_price > 0:
+                target_roi = calculate_target_roi(
+                    entry_price,
+                    tp_price,
+                    side,
+                    leverage
+                )
+                changed = update_trade_field(
+                    trade,
+                    "target_roi",
+                    round(target_roi, 4)
+                ) or changed
+
+            if safe_float(trade.get("profit_protection_trigger_roi"), 0) <= 0:
+                changed = update_trade_field(
+                    trade,
+                    "profit_protection_trigger_roi",
+                    round(calculate_profit_protection_trigger(target_roi), 4)
+                ) or changed
+
+        if changed:
+            save_open_trade_state()
+
+    except Exception as e:
+        log_error(f"OPEN TRADE STATE SYNC ERROR: {e}")
 
 
 def record_untracked_protection_close(
@@ -392,6 +675,109 @@ def calculate_post_fill_tp_sl_plan(
     }
 
 
+def is_better_stop_loss(side, current_sl, new_sl):
+    if new_sl is None or new_sl <= 0:
+        return False
+
+    if current_sl <= 0:
+        return True
+
+    if side == "BUY":
+        return new_sl > current_sl
+
+    return new_sl < current_sl
+
+
+def update_trade_stop_loss(symbol, trade, current_roi, peak_roi):
+    target_roi = safe_float(trade.get("target_roi"), 0)
+    entry_price = safe_float(trade.get("entry_price"), 0)
+    tp_price = safe_float(trade.get("tp_price"), 0)
+    current_sl = safe_float(trade.get("sl_price"), 0)
+    leverage = safe_float(trade.get("leverage"), config.LEVERAGE)
+    side = trade.get("side")
+
+    if target_roi <= 0 or entry_price <= 0 or tp_price <= 0 or leverage <= 0:
+        return False
+
+    if side not in ("BUY", "SELL"):
+        return False
+
+    stage_rank = {
+        "": 0,
+        "BREAKEVEN": 1,
+        "PROFIT_LOCK": 2,
+    }
+    current_stage = trade.get("sl_management_stage", "")
+    desired_stage = ""
+    lock_roi = 0
+
+    profit_lock_trigger = (
+        target_roi
+        * getattr(config, "PROFIT_LOCK_TRIGGER_TP_PCT", 65)
+        / 100
+    )
+    breakeven_trigger = (
+        target_roi
+        * getattr(config, "BREAKEVEN_TRIGGER_TP_PCT", 40)
+        / 100
+    )
+
+    if (
+        getattr(config, "PROFIT_LOCK_SL_ENABLED", True)
+        and peak_roi >= profit_lock_trigger
+    ):
+        desired_stage = "PROFIT_LOCK"
+        lock_roi = max(
+            getattr(config, "BREAKEVEN_LOCK_ROI", 0.35),
+            target_roi
+            * getattr(config, "PROFIT_LOCK_SL_TP_PCT", 35)
+            / 100
+        )
+    elif (
+        getattr(config, "BREAKEVEN_SL_ENABLED", True)
+        and peak_roi >= breakeven_trigger
+    ):
+        desired_stage = "BREAKEVEN"
+        lock_roi = getattr(config, "BREAKEVEN_LOCK_ROI", 0.35)
+
+    if not desired_stage:
+        return False
+
+    if stage_rank.get(desired_stage, 0) <= stage_rank.get(current_stage, 0):
+        return False
+
+    new_sl = calculate_sl_price_from_roi(
+        entry_price,
+        side,
+        lock_roi,
+        leverage
+    )
+
+    if side == "BUY" and new_sl >= tp_price:
+        return False
+
+    if side == "SELL" and new_sl <= tp_price:
+        return False
+
+    if not is_better_stop_loss(side, current_sl, new_sl):
+        return False
+
+    if not replace_stop_loss(symbol, side, new_sl):
+        return False
+
+    trade["sl_price"] = new_sl
+    trade["sl_management_stage"] = desired_stage
+    trade["sl_move_count"] = int(trade.get("sl_move_count", 0)) + 1
+    save_open_trade_state()
+
+    log_warning(
+        f"{symbol} {desired_stage} SL ACTIVE | "
+        f"LOCK_ROI={lock_roi:.2f}% | NEW_SL={new_sl} | "
+        f"PEAK_ROI={peak_roi:.2f}% | CURRENT_ROI={current_roi:.2f}%"
+    )
+    return True
+
+
 def recover_untracked_positions(open_symbols):
     position_details = get_open_position_details()
     recovered_count = 0
@@ -413,6 +799,7 @@ def recover_untracked_positions(open_symbols):
 
         side = position["side"]
         tp_price = position.get("tp_price")
+        sl_price = position.get("sl_price")
         target_roi = calculate_target_roi(
             entry_price,
             tp_price,
@@ -435,7 +822,7 @@ def recover_untracked_positions(open_symbols):
             "entry_price": entry_price,
             "quantity": quantity,
             "tp_price": tp_price or "",
-            "sl_price": "",
+            "sl_price": sl_price or "",
             "rr": "",
             "target_roi": round(target_roi, 4),
             "profit_protection_trigger_roi": round(
@@ -444,6 +831,8 @@ def recover_untracked_positions(open_symbols):
             ),
             "peak_roi": 0,
             "last_roi": 0,
+            "sl_management_stage": "",
+            "sl_move_count": 0,
             "early_exit_reason": "RECOVERED_AFTER_RECONNECT",
         }
 
@@ -456,6 +845,7 @@ def recover_untracked_positions(open_symbols):
 
     if recovered_count:
         log_warning(f"RECOVERED {recovered_count} OPEN POSITION(S)")
+        save_open_trade_state()
 
 
 def close_tracked_trade(symbol, reason):
@@ -478,6 +868,7 @@ def close_tracked_trade(symbol, reason):
         return False
 
     trade["early_exit_reason"] = reason
+    save_open_trade_state()
     return True
 
 
@@ -573,12 +964,14 @@ def manage_open_trade(symbol):
     now = datetime.now()
     duration = now - trade["entry_time"]
     duration_minutes = duration.total_seconds() / 60
-    current_roi = metrics["leveraged_roi"]
+    trade_leverage = safe_float(trade.get("leverage"), config.LEVERAGE)
+    current_roi = metrics["price_move_pct"] * trade_leverage
     peak_roi = trade.get("peak_roi", current_roi)
     peak_roi = max(peak_roi, current_roi)
     trade["peak_roi"] = peak_roi
     trade["last_roi"] = current_roi
     trade["last_unrealized_pnl"] = metrics["unrealized_pnl"]
+    save_open_trade_state()
 
     trigger_roi = trade.get(
         "profit_protection_trigger_roi",
@@ -591,6 +984,8 @@ def manage_open_trade(symbol):
         f"PEAK={peak_roi:.2f}% | PROTECT={trigger_roi:.2f}% | "
         f"MIN={duration_minutes:.1f}"
     )
+
+    update_trade_stop_loss(symbol, trade, current_roi, peak_roi)
 
     if (
         config.MARKET_REVERSAL_EXIT_ENABLED
@@ -679,30 +1074,26 @@ def finalize_tracked_trade(symbol, apply_loss_cooldown=True):
     if symbol not in trade_times:
         return
 
+    trade = trade_times[symbol]
     exit_time = datetime.now()
-    entry_time = trade_times[symbol]['entry_time']
+    entry_time = trade['entry_time']
     duration = exit_time - entry_time
-    side = trade_times[symbol]['side']
+    side = trade['side']
     realized_pnl = get_realized_pnl_since(symbol, entry_time)
+    outcome = classify_realized_pnl(realized_pnl)
+    close_reason = infer_exchange_close_reason(trade, outcome)
 
-    if realized_pnl is None:
-        outcome = "UNKNOWN"
-    elif realized_pnl > 0:
-        outcome = "WIN"
-    elif realized_pnl < 0:
-        outcome = "LOSS"
-    else:
-        outcome = "BREAKEVEN"
-
-    close_data = trade_times[symbol].copy()
+    close_data = trade.copy()
     close_data.update({
         "event": "CLOSE",
         "time": exit_time.isoformat(),
         "entry_time": entry_time.isoformat(),
         "exit_time": exit_time.isoformat(),
         "duration_seconds": int(duration.total_seconds()),
+        "exit_price": get_mark_price(symbol) or "",
         "realized_pnl": realized_pnl,
-        "outcome": outcome
+        "outcome": outcome,
+        "early_exit_reason": close_reason
     })
     append_trade_event(close_data)
 
@@ -724,10 +1115,12 @@ def finalize_tracked_trade(symbol, apply_loss_cooldown=True):
         f"EXIT: {exit_time} | "
         f"DURATION: {duration} | "
         f"OUTCOME: {outcome} | "
-        f"PNL: {realized_pnl}"
+        f"PNL: {realized_pnl} | "
+        f"REASON: {close_reason if close_reason else 'UNKNOWN'}"
     )
 
     del trade_times[symbol]
+    save_open_trade_state()
 
 
 def get_cooldown_key(symbol, side):
@@ -896,11 +1289,13 @@ def get_symbol_klines(symbol):
 def run_bot():
 
     log_info("BOT STARTED")
+    load_open_trade_state()
 
     while True:
 
         try:
             open_symbols, position_counts = get_open_position_snapshot()
+            sync_open_trade_state(open_symbols)
             recover_untracked_positions(open_symbols)
             btc_context_df = get_btc_context_df()
             btc_trend = get_btc_trend_from_df(btc_context_df)
@@ -924,69 +1319,7 @@ def run_bot():
                         if symbol not in open_symbols:
 
                             cancel_remaining_orders(symbol)
-
-                            exit_time = datetime.now()
-                            entry_time = trade_times[symbol]['entry_time']
-                            duration = exit_time - entry_time
-                            side = trade_times[symbol]['side']
-                            realized_pnl = get_realized_pnl_since(
-                                symbol,
-                                entry_time
-                            )
-
-                            if realized_pnl is None:
-                                outcome = "UNKNOWN"
-                            elif realized_pnl > 0:
-                                outcome = "WIN"
-                            elif realized_pnl < 0:
-                                outcome = "LOSS"
-                            else:
-                                outcome = "BREAKEVEN"
-
-                            close_data = trade_times[symbol].copy()
-                            close_data.update({
-                                "event": "CLOSE",
-                                "time": exit_time.isoformat(),
-                                "entry_time": entry_time.isoformat(),
-                                "exit_time": exit_time.isoformat(),
-                                "duration_seconds": int(
-                                    duration.total_seconds()
-                                ),
-                                "realized_pnl": realized_pnl,
-                                "outcome": outcome
-                            })
-                            append_trade_event(close_data)
-
-                            if outcome == "LOSS":
-                                cooldown_until = exit_time + timedelta(
-                                    minutes=config.COOLDOWN_AFTER_SL_MINUTES
-                                )
-                                symbol_cooldown_until = exit_time + timedelta(
-                                    minutes=config.SYMBOL_COOLDOWN_AFTER_LOSS_MINUTES
-                                )
-                                cooldowns[get_cooldown_key(symbol, side)] = (
-                                    cooldown_until
-                                )
-                                symbol_cooldowns[symbol] = symbol_cooldown_until
-                                log_warning(
-                                    f"{symbol} {side} COOLDOWN UNTIL "
-                                    f"{cooldown_until}"
-                                )
-                                log_warning(
-                                    f"{symbol} SYMBOL COOLDOWN UNTIL "
-                                    f"{symbol_cooldown_until}"
-                                )
-
-                            log_info(
-                                f"*** {symbol} TRADE CLOSED *** | "
-                                f"ENTRY: {entry_time} | "
-                                f"EXIT: {exit_time} | "
-                                f"DURATION: {duration} | "
-                                f"OUTCOME: {outcome} | "
-                                f"PNL: {realized_pnl}"
-                            )
-
-                            del trade_times[symbol]
+                            finalize_tracked_trade(symbol)
                             continue
 
                     # =========================
@@ -1565,6 +1898,8 @@ def run_bot():
                         ),
                         "peak_roi": 0,
                         "last_roi": 0,
+                        "sl_management_stage": "",
+                        "sl_move_count": 0,
                         **setup_snapshot
                     }
 
@@ -1576,6 +1911,7 @@ def run_bot():
                         "outcome": "OPEN"
                     })
                     append_trade_event(open_event)
+                    save_open_trade_state()
                     open_symbols.add(symbol)
                     position_counts['total'] += 1
 
