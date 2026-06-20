@@ -77,6 +77,9 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
         if current_price <= 0 or sl_price <= 0 or atr <= 0:
             return False, "INVALID ENTRY QUALITY DATA"
 
+        if candle_range <= 0:
+            return False, "INVALID SIGNAL CANDLE RANGE"
+
         risk = abs(current_price - sl_price)
 
         if risk <= 0:
@@ -92,6 +95,7 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
         ema20_tolerance_pct = get_config_float("ENTRY_EMA20_TOLERANCE_PCT", 0.12)
         min_body_ratio = get_config_float("MIN_SIGNAL_BODY_RATIO", 0.18)
         min_close_position = get_config_float("MIN_SIGNAL_CLOSE_POSITION", 0.45)
+        max_close_position = get_config_float("MAX_SIGNAL_CLOSE_POSITION", 0.88)
 
         if ema20_distance_pct > max_ema_distance_pct:
             return (False, f"ENTRY TOO FAR FROM EMA20: {ema20_distance_pct:.2f}%")
@@ -99,7 +103,7 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
         if candle_range > atr * max_signal_candle_atr:
             return (False, f"SIGNAL CANDLE TOO LARGE: {candle_range / atr:.2f} ATR")
 
-        if candle_range > 0 and candle_body / candle_range < min_body_ratio:
+        if candle_body / candle_range < min_body_ratio:
             return False, "SIGNAL CANDLE BODY TOO WEAK"
 
         if signal == "BUY":
@@ -111,8 +115,11 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
 
             close_position = (entry["close"] - entry["low"]) / candle_range
 
-            if candle_range > 0 and close_position < min_close_position:
+            if close_position < min_close_position:
                 return False, "BUY WEAK CANDLE CLOSE"
+
+            if close_position > max_close_position:
+                return False, f"BUY ENTRY TOO CLOSE TO CANDLE HIGH: {close_position:.2f}"
 
             if sl_price >= current_price:
                 return False, "BUY SL ABOVE ENTRY"
@@ -126,8 +133,11 @@ def validate_entry_quality(signal, entry_df, trend_df, current_price, sl_price):
 
             close_position = (entry["high"] - entry["close"]) / candle_range
 
-            if candle_range > 0 and close_position < min_close_position:
+            if close_position < min_close_position:
                 return False, "SELL WEAK CANDLE CLOSE"
+
+            if close_position > max_close_position:
+                return False, f"SELL ENTRY TOO CLOSE TO CANDLE LOW: {close_position:.2f}"
 
             if sl_price <= current_price:
                 return False, "SELL SL BELOW ENTRY"
@@ -174,8 +184,17 @@ def validate_live_entry_timing(signal, entry_df, live_price):
         ema20 = signal_candle["ema20"]
         vwap = signal_candle["vwap"] if "vwap" in signal_candle.index else None
         live_open = live_candle["open"]
+        live_high = max(live_candle["high"], live_price)
+        live_low = min(live_candle["low"], live_price)
+        live_range = live_high - live_low
+        max_live_position = get_config_float("MAX_LIVE_ENTRY_CLOSE_POSITION", 0.88)
+
+        if live_range <= 0:
+            return False, "INVALID LIVE CANDLE RANGE"
 
         if signal == "BUY":
+            live_position = (live_price - live_low) / live_range
+
             if live_price < ema20 * (1 - ema_tolerance_pct / 100):
                 return False, "LIVE BUY BELOW EMA20"
 
@@ -188,10 +207,15 @@ def validate_live_entry_timing(signal, entry_df, live_price):
             if live_price > signal_close + (atr * chase_atr):
                 return False, "LIVE BUY CHASING TOO FAR"
 
+            if live_position > max_live_position:
+                return False, f"LIVE BUY TOO CLOSE TO CANDLE HIGH: {live_position:.2f}"
+
             if live_price < live_open:
                 return False, "LIVE BUY CURRENT CANDLE WEAK"
 
         elif signal == "SELL":
+            live_position = (live_high - live_price) / live_range
+
             if live_price > ema20 * (1 + ema_tolerance_pct / 100):
                 return False, "LIVE SELL ABOVE EMA20"
 
@@ -203,6 +227,9 @@ def validate_live_entry_timing(signal, entry_df, live_price):
 
             if live_price < signal_close - (atr * chase_atr):
                 return False, "LIVE SELL CHASING TOO FAR"
+
+            if live_position > max_live_position:
+                return False, f"LIVE SELL TOO CLOSE TO CANDLE LOW: {live_position:.2f}"
 
             if live_price > live_open:
                 return False, "LIVE SELL CURRENT CANDLE WEAK"
@@ -542,10 +569,16 @@ def check_signal(
         min_volume_sma_mult = get_config_float("MIN_VOLUME_SMA_MULT", 1.0)
         volume_ok = entry["volume"] >= entry["volume_sma"] * min_volume_sma_mult
         candle_range = entry["high"] - entry["low"]
+
+        if candle_range <= 0:
+            log_warning("NO SIGNAL | INVALID SIGNAL CANDLE RANGE")
+            return build_signal_result(None, 0, return_confidence)
+
         candle_body = abs(entry["close"] - entry["open"])
         body_ratio = candle_body / candle_range if candle_range > 0 else 0
         min_body_ratio = get_config_float("MIN_SIGNAL_BODY_RATIO", 0.12)
         min_close_position = get_config_float("MIN_SIGNAL_CLOSE_POSITION", 0.45)
+        max_close_position = get_config_float("MAX_SIGNAL_CLOSE_POSITION", 0.88)
         max_rejection_wick_ratio = get_config_float(
             "MAX_SIGNAL_REJECTION_WICK_RATIO",
             0.55
@@ -589,6 +622,8 @@ def check_signal(
         )
         buy_close_ok = buy_close_position >= min_close_position
         sell_close_ok = sell_close_position >= min_close_position
+        buy_not_at_top = buy_close_position <= max_close_position
+        sell_not_at_bottom = sell_close_position <= max_close_position
         ema_slope = entry["ema20"] - prev_entry["ema20"]
         prev_ema_slope = prev_entry["ema20"] - prev2_entry["ema20"]
         slope_tolerance = entry["atr"] * get_config_float(
@@ -654,6 +689,7 @@ def check_signal(
             and body_ratio >= min_body_ratio
             and buy_wick_ok
             and buy_close_ok
+            and buy_not_at_top
             and buy_momentum_ok
         )
         sell_valid = (
@@ -665,6 +701,7 @@ def check_signal(
             and body_ratio >= min_body_ratio
             and sell_wick_ok
             and sell_close_ok
+            and sell_not_at_bottom
             and sell_momentum_ok
         )
 
@@ -683,13 +720,19 @@ def check_signal(
             atr_pct
         )
 
+        late_penalty = get_config_float("LATE_ENTRY_SCORE_PENALTY", 2)
+
         if buy_late:
-            buy_score -= 3
-            log_info(f"BUY FLOW late penalty: {buy_late_reason}")
+            buy_score -= late_penalty
+            log_info(
+                f"BUY FLOW late penalty {late_penalty}: {buy_late_reason}"
+            )
 
         if sell_late:
-            sell_score -= 3
-            log_info(f"SELL FLOW late penalty: {sell_late_reason}")
+            sell_score -= late_penalty
+            log_info(
+                f"SELL FLOW late penalty {late_penalty}: {sell_late_reason}"
+            )
 
         buy_score = apply_market_context_score(
             "BUY",
@@ -793,6 +836,14 @@ def check_signal(
         buy_reversal_score = add_score(buy_reversal_score, volume_ok, 1)
         buy_reversal_score = add_score(
             buy_reversal_score,
+            (
+                getattr(config, "REVERSAL_MOMENTUM_SCORE_ENABLED", True)
+                and buy_momentum_ok
+            ),
+            1
+        )
+        buy_reversal_score = add_score(
+            buy_reversal_score,
             body_ratio >= min_body_ratio,
             1
         )
@@ -824,6 +875,14 @@ def check_signal(
         sell_reversal_score = add_score(sell_reversal_score, volume_ok, 1)
         sell_reversal_score = add_score(
             sell_reversal_score,
+            (
+                getattr(config, "REVERSAL_MOMENTUM_SCORE_ENABLED", True)
+                and sell_momentum_ok
+            ),
+            1
+        )
+        sell_reversal_score = add_score(
+            sell_reversal_score,
             body_ratio >= min_body_ratio,
             1
         )
@@ -848,6 +907,7 @@ def check_signal(
             and body_ratio >= min_body_ratio
             and buy_wick_ok
             and buy_close_ok
+            and buy_not_at_top
         )
         sell_reversal_valid = (
             sell_reversal_trigger
@@ -859,6 +919,7 @@ def check_signal(
             and body_ratio >= min_body_ratio
             and sell_wick_ok
             and sell_close_ok
+            and sell_not_at_bottom
         )
 
         buy_reversal_conf = score_to_confidence(buy_reversal_score, 29)
@@ -908,6 +969,7 @@ def check_signal(
             body=body_ratio >= min_body_ratio,
             wick=buy_wick_ok,
             close=buy_close_ok,
+            momentum=buy_momentum_ok,
         )
         log_gate_state(
             "SELL REVERSAL",
@@ -920,6 +982,7 @@ def check_signal(
             body=body_ratio >= min_body_ratio,
             wick=sell_wick_ok,
             close=sell_close_ok,
+            momentum=sell_momentum_ok,
         )
 
         log_info(
