@@ -1,9 +1,8 @@
 from binance.client import Client
-from binance.enums import *
+from binance.enums import FUTURE_ORDER_TYPE_MARKET, SIDE_BUY, SIDE_SELL
 
 import pandas as pd
 import time
-import numpy as np
 
 import config
 from indicators import apply_indicators
@@ -99,14 +98,6 @@ def get_balance():
     return 0
 
 
-def get_margin_balance():
-    return float(client.futures_account()['totalMarginBalance'])
-
-
-def get_unrealized_pnl():
-    return float(client.futures_account()['totalUnrealizedProfit'])
-
-
 def get_mark_price(symbol):
 
     try:
@@ -166,41 +157,6 @@ def get_klines(symbol, interval, limit=None):
     except Exception as e:
         log_error(f"{symbol} klines error: {e}")
         return None
-
-
-# =========================
-# POSITION CHECKS
-# =========================
-def has_open_position(symbol):
-
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-
-        for p in positions:
-            if float(p['positionAmt']) != 0:
-                return True
-
-        return False
-
-    except Exception as e:
-        log_error(str(e))
-        return False
-
-
-def is_position_closed(symbol):
-
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-
-        for p in positions:
-            if abs(float(p['positionAmt'])) > 0:
-                return False
-
-        return True
-
-    except Exception as e:
-        log_error(f"{symbol} position check error: {e}")
-        return False
 
 
 def get_open_position_counts():
@@ -459,99 +415,6 @@ def close_market_position(symbol, entry_side, quantity):
         return None
 
 
-# =========================
-# STRUCTURE SL (ALIGNED WITH STRATEGY)
-# =========================
-def get_structure_stop_loss(df, side):
-
-    try:
-
-        atr = df['atr'].iloc[-2]
-
-        if side == SIDE_BUY or side == "BUY":
-
-            swing_low_10 = df['low'].iloc[-10:-1].min()
-            swing_low_20 = df['low'].iloc[-20:-1].min()
-
-            swing_low = min(swing_low_10, swing_low_20)
-
-            return swing_low - (atr * 0.8)
-
-        else:
-
-            swing_high_10 = df['high'].iloc[-10:-1].max()
-            swing_high_20 = df['high'].iloc[-20:-1].max()
-
-            swing_high = max(swing_high_10, swing_high_20)
-
-            return swing_high + (atr * 0.8)
-
-    except Exception as e:
-        log_error(f"SL error: {e}")
-        return None
-    
-def get_structure_take_profit(df, side):
-
-    try:
-
-        atr = df['atr'].iloc[-2]
-
-        if side == "BUY":
-
-            swing_high_10 = df['high'].iloc[-10:-1].max()
-            swing_high_20 = df['high'].iloc[-20:-1].max()
-
-            swing_high = max(
-                swing_high_10,
-                swing_high_20
-            )
-
-            return swing_high + (atr * 0.5)
-
-        else:
-
-            swing_low_10 = df['low'].iloc[-10:-1].min()
-            swing_low_20 = df['low'].iloc[-20:-1].min()
-
-            swing_low = min(
-                swing_low_10,
-                swing_low_20
-            )
-
-            return swing_low - (atr * 0.5)
-
-    except Exception as e:
-        log_error(f"TP ERROR: {e}")
-        return None
-    
-def get_hybrid_take_profit(df, side, sl_price, rr=1.5):
-
-    try:
-
-        price = df['close'].iloc[-2]
-
-        if side == "BUY":
-
-            risk = price - sl_price
-
-            if risk <= 0:
-                return None
-
-            return price + (risk * rr)
-
-        else:
-
-            risk = sl_price - price
-
-            if risk <= 0:
-                return None
-
-            return price - (risk * rr)
-
-    except Exception as e:
-        log_error(f"HYBRID TP ERROR: {e}")
-        return None
-    
 def calculate_rr_take_profit(entry_price, sl_price, side, rr=1.5):
 
     try:
@@ -859,36 +722,6 @@ def calculate_adaptive_take_profit(
         return None
 
 
-def get_structure_aware_take_profit(df, side, sl_price, rr=1.5):
-
-    try:
-
-        price = df['close'].iloc[-2]
-        rr_tp = get_hybrid_take_profit(df, side, sl_price, rr)
-        support, resistance = get_support_resistance(df)
-
-        if rr_tp is None:
-            return None
-
-        if side == "BUY":
-
-            if resistance is None or resistance <= price:
-                return rr_tp
-
-            return min(rr_tp, resistance)
-
-        else:
-
-            if support is None or support >= price:
-                return rr_tp
-
-            return max(rr_tp, support)
-
-    except Exception as e:
-        log_error(f"HYBRID TP ERROR: {e}")
-        return None
-
-
 def calculate_trailing_activation_price(entry_price, tp_price, side):
 
     try:
@@ -946,7 +779,6 @@ def place_native_trailing_stop(symbol, side, entry_price, quantity, tp_price):
 
         activation_price = round(activation_price, precision)
         activation_price_str = f"{activation_price:.{precision}f}"
-        callback_rate_str = str(config.TRAILING_CALLBACK_RATE)
 
         market_price = float(
             client.futures_mark_price(symbol=symbol)['markPrice']
@@ -1109,37 +941,6 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, tp_price, sl_pr
 
 
 # =========================
-# BTC CORRELATION
-# =========================
-def get_btc_correlation(symbol):
-
-    try:
-
-        if symbol == "BTCUSDT":
-            return 1.0
-
-        coin_df = get_klines(symbol, config.TREND_TIMEFRAME, 100)
-        btc_df = get_klines("BTCUSDT", config.TREND_TIMEFRAME, 100)
-
-        if coin_df is None or btc_df is None:
-            return 0
-
-        coin_ret = coin_df['close'].iloc[:-1].pct_change().dropna()
-        btc_ret = btc_df['close'].iloc[:-1].pct_change().dropna()
-
-        corr = np.corrcoef(coin_ret, btc_ret)[0, 1]
-
-        if np.isnan(corr):
-            return 0
-
-        return round(float(corr), 2)
-
-    except Exception as e:
-        log_error(f"{symbol} corr error: {e}")
-        return 0
-
-
-# =========================
 # BTC TREND
 # =========================
 def get_btc_trend():
@@ -1164,38 +965,6 @@ def get_btc_trend():
         return None
 
 
-# =========================
-# RELATIVE STRENGTH
-# =========================
-def get_relative_strength(symbol):
-
-    try:
-
-        if symbol == "BTCUSDT":
-            return 0
-
-        coin = get_klines(symbol, config.TREND_TIMEFRAME, 50)
-        btc = get_klines("BTCUSDT", config.TREND_TIMEFRAME, 50)
-
-        if coin is None or btc is None:
-            return 0
-
-        coin_r = (
-            (coin['close'].iloc[-2] - coin['close'].iloc[-11])
-            / coin['close'].iloc[-11]
-        ) * 100
-
-        btc_r = (
-            (btc['close'].iloc[-2] - btc['close'].iloc[-11])
-            / btc['close'].iloc[-11]
-        ) * 100
-
-        return round(coin_r - btc_r, 2)
-
-    except Exception as e:
-        log_error(f"{symbol} RS error: {e}")
-        return 0
-    
 def validate_min_notional(symbol, quantity, price):
 
     try:

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 import config
 
-from binance.enums import *
+from binance.enums import SIDE_BUY, SIDE_SELL
 
 from exchange import (
     get_klines,
@@ -18,8 +18,6 @@ from exchange import (
     setup_leverage,
     get_entry_price,
     get_mark_price,
-    get_margin_balance,
-    get_unrealized_pnl,
     get_realized_pnl_since,
     get_position_metrics,
     get_btc_trend,

@@ -288,28 +288,6 @@ def detect_liquidity_sweep(df):
 
 
 # =========================================================
-# ORDER BLOCK DETECTION (UNCHANGED)
-# =========================================================
-def detect_order_block(df):
-
-    try:
-
-        body = abs(df["close"] - df["open"])
-
-        idx = body.iloc[-21:-1].idxmax()
-
-        ob_high = df["high"].loc[idx]
-        ob_low = df["low"].loc[idx]
-
-        ob_type = "BULLISH" if df["close"].loc[idx] > df["open"].loc[idx] else "BEARISH"
-
-        return ob_high, ob_low, ob_type
-
-    except Exception:
-        return None, None, None
-
-
-# =========================================================
 # MARKET STRUCTURE DETECTION (BOS / CHOCH CONTEXT)
 # =========================================================
 def detect_market_structure(df):
@@ -385,22 +363,6 @@ def pct_distance(a, b):
     return abs(a - b) / b * 100
 
 
-def classify_market_regime(confirm, atr_pct, ema_gap_pct):
-    if atr_pct > get_config_float("MAX_ATR_PCT", 3.2) * 0.85:
-        return "VOLATILE"
-
-    if confirm["adx"] >= get_config_float("TRENDING_ADX", 25):
-        return "TRENDING"
-
-    if confirm["adx"] <= get_config_float("SIDEWAYS_ADX", 15):
-        return "SIDEWAYS"
-
-    if ema_gap_pct < get_config_float("MIN_EMA_GAP_PCT", 0.18) * 1.5:
-        return "COMPRESSED"
-
-    return "NORMAL"
-
-
 def count_direction_candles(df, side, lookback=6):
     count = 0
 
@@ -467,15 +429,6 @@ def is_late_entry(side, entry_df, trend_df, entry, atr_pct):
             return True, f"SELL RSI OVERHEATED: {entry['rsi']:.2f}"
 
     return False, "ENTRY TIMING OK"
-
-
-def add_candidate(candidates, side, mode, score, max_score, valid, reason):
-    confidence = score_to_confidence(max(0, score), max_score)
-
-    if valid:
-        candidates.append((side, mode, confidence, reason))
-
-    return confidence
 
 
 def log_gate_state(name, **gates):
