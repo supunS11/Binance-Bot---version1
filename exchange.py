@@ -257,6 +257,16 @@ def get_unrealized_pnl():
     return float(client.futures_account()['totalUnrealizedProfit'])
 
 
+def get_mark_price(symbol):
+
+    try:
+        return float(client.futures_mark_price(symbol=symbol)['markPrice'])
+
+    except Exception as e:
+        log_error(f"{symbol} mark price error: {e}")
+        return None
+
+
 # =========================
 # KLINES
 # =========================
@@ -516,9 +526,10 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, structure_tp=No
     try:
         precision = get_price_precision(symbol)
 
-        market_price = float(
-            client.futures_mark_price(symbol=symbol)['markPrice']
-        )
+        market_price = get_mark_price(symbol)
+
+        if market_price is None:
+            return False
 
         if side == SIDE_BUY:
             sl_price = None

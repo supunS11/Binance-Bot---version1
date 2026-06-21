@@ -19,6 +19,8 @@ FIELDNAMES = [
     "sell_score",
     "buy_base_score",
     "sell_base_score",
+    "buy_smc_score",
+    "sell_smc_score",
     "buy_participation_score",
     "sell_participation_score",
     "buy_hard_ok",
@@ -29,6 +31,14 @@ FIELDNAMES = [
     "sell_level",
     "buy_level_source",
     "sell_level_source",
+    "buy_smc_sweep",
+    "sell_smc_sweep",
+    "buy_smc_order_block",
+    "sell_smc_order_block",
+    "buy_smc_fvg_support",
+    "sell_smc_fvg_support",
+    "buy_smc_fvg_block",
+    "sell_smc_fvg_block",
     "btc_trend",
     "btc_corr",
     "relative_strength",
@@ -79,6 +89,20 @@ def _level_value(side, key):
     return level.get(key, "")
 
 
+def _smc_source(side, key):
+    smc = side.get("smc_context") if side else None
+
+    if not smc:
+        return ""
+
+    item = smc.get(key)
+
+    if not item:
+        return ""
+
+    return item.get("source", "")
+
+
 def append_signal_journal(
     symbol,
     analysis,
@@ -115,6 +139,8 @@ def append_signal_journal(
             "sell_score": _side_value(sell, "score"),
             "buy_base_score": _side_value(buy, "base_score"),
             "sell_base_score": _side_value(sell, "base_score"),
+            "buy_smc_score": _side_value(buy, "smc_score"),
+            "sell_smc_score": _side_value(sell, "smc_score"),
             "buy_participation_score": _side_value(buy, "participation_score"),
             "sell_participation_score": _side_value(sell, "participation_score"),
             "buy_hard_ok": _side_value(buy, "hard_ok"),
@@ -125,6 +151,14 @@ def append_signal_journal(
             "sell_level": _level_value(sell, "level"),
             "buy_level_source": _level_value(buy, "source"),
             "sell_level_source": _level_value(sell, "source"),
+            "buy_smc_sweep": _smc_source(buy, "liquidity_sweep"),
+            "sell_smc_sweep": _smc_source(sell, "liquidity_sweep"),
+            "buy_smc_order_block": _smc_source(buy, "order_block"),
+            "sell_smc_order_block": _smc_source(sell, "order_block"),
+            "buy_smc_fvg_support": _smc_source(buy, "fvg_support"),
+            "sell_smc_fvg_support": _smc_source(sell, "fvg_support"),
+            "buy_smc_fvg_block": _smc_source(buy, "fvg_block"),
+            "sell_smc_fvg_block": _smc_source(sell, "fvg_block"),
             "btc_trend": btc_trend,
             "btc_corr": btc_corr,
             "relative_strength": rs,

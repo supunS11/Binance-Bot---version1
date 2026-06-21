@@ -322,6 +322,507 @@ def validate_structure_take_profit(side, entry_price, trend_df, confirm_df, leve
     }
 
 
+def _closed_data(df, lookback=None):
+    data = df.iloc[:-1].copy() if len(df) > 1 else df.copy()
+
+    if lookback:
+        data = data.tail(lookback)
+
+    return data
+
+
+def _body(candle):
+    return abs(float(candle["close"]) - float(candle["open"]))
+
+
+def _is_bullish(candle):
+    return candle["close"] > candle["open"]
+
+
+def _is_bearish(candle):
+    return candle["close"] < candle["open"]
+
+
+def _candle_atr(candle):
+    try:
+        return max(float(candle["atr"]), 1e-10)
+    except Exception:
+        return max(float(candle["high"] - candle["low"]), 1e-10)
+
+
+def _average_range(df, period=14):
+    data = _closed_data(df, period)
+
+    if len(data) == 0:
+        return 0
+
+    ranges = data["high"] - data["low"]
+    value = ranges.mean()
+
+    return max(float(value), 1e-10)
+
+
+def _close_position(candle):
+    high = float(candle["high"])
+    low = float(candle["low"])
+    close = float(candle["close"])
+    candle_range = high - low
+
+    if candle_range <= 0:
+        return 0.5
+
+    return (close - low) / candle_range
+
+
+def _adverse_zone(side, entry_price, leverage=None):
+    leverage_to_use = leverage or config.LEVERAGE
+    max_adverse_roi = abs(get_config_float("LONG_TERM_MAX_ADVERSE_ROI", 50))
+    max_price_move = (max_adverse_roi / max(leverage_to_use, 1)) / 100
+
+    if side == "BUY":
+        return entry_price * (1 - max_price_move), entry_price
+
+    return entry_price, entry_price * (1 + max_price_move)
+
+
+def _live_entry_timeframe_check(side, df, mark_price, label):
+    data = _closed_data(df)
+    lookback = get_config_int("LIVE_ENTRY_STRUCTURE_LOOKBACK", 12)
+
+    if len(data) < lookback + 2:
+        return {
+            "label": label,
+            "block": False,
+            "structure_break": False,
+            "opposite_reversal": False,
+            "reason": "INSUFFICIENT_DATA",
+        }
+
+    latest = data.iloc[-1]
+    previous = data.iloc[-lookback - 1:-1]
+    atr = _average_range(df, 14)
+    structure_buffer = atr * get_config_float(
+        "LIVE_ENTRY_STRUCTURE_BUFFER_ATR",
+        0.08
+    )
+    retrace_atr = get_config_float("MAX_LIVE_ENTRY_RETRACE_ATR", 0.20)
+    min_body_atr = get_config_float("LIVE_ENTRY_MIN_REVERSAL_BODY_ATR", 0.35)
+    close_pos_limit = get_config_float("LIVE_ENTRY_REVERSAL_CLOSE_POSITION", 0.30)
+    close_position = _close_position(latest)
+    body_atr = _body(latest) / atr
+
+    if side == "BUY":
+        recent_low = float(previous["low"].min())
+        structure_break = mark_price < recent_low - structure_buffer
+        opposite_reversal = (
+            _is_bearish(latest)
+            and body_atr >= min_body_atr
+            and close_position <= close_pos_limit
+            and mark_price <= float(latest["close"]) - (atr * retrace_atr)
+        )
+        reason = "BUY_GUARD"
+    else:
+        recent_high = float(previous["high"].max())
+        structure_break = mark_price > recent_high + structure_buffer
+        opposite_reversal = (
+            _is_bullish(latest)
+            and body_atr >= min_body_atr
+            and close_position >= 1 - close_pos_limit
+            and mark_price >= float(latest["close"]) + (atr * retrace_atr)
+        )
+        reason = "SELL_GUARD"
+
+    return {
+        "label": label,
+        "block": structure_break or opposite_reversal,
+        "structure_break": structure_break,
+        "opposite_reversal": opposite_reversal,
+        "close_position": round(float(close_position), 2),
+        "body_atr": round(float(body_atr), 2),
+        "mark_price": round(float(mark_price), 8),
+        "latest_close": round(float(latest["close"]), 8),
+        "reason": reason,
+    }
+
+
+def validate_live_entry_guard(side, fast_df, slow_df, mark_price):
+    if not config.LIVE_ENTRY_CONFIRMATION_ENABLED:
+        return True, {"reason": "LIVE_ENTRY_GUARD_DISABLED"}
+
+    if fast_df is None or slow_df is None or mark_price is None:
+        if config.LIVE_ENTRY_REQUIRE_DATA:
+            return False, {"reason": "LIVE_ENTRY_GUARD_DATA_UNAVAILABLE"}
+
+        return True, {"reason": "LIVE_ENTRY_GUARD_DATA_UNAVAILABLE_ALLOWED"}
+
+    fast = _live_entry_timeframe_check(
+        side,
+        fast_df,
+        mark_price,
+        config.LIVE_ENTRY_FAST_TIMEFRAME
+    )
+    slow = _live_entry_timeframe_check(
+        side,
+        slow_df,
+        mark_price,
+        config.LIVE_ENTRY_SLOW_TIMEFRAME
+    )
+    structure_break = fast["structure_break"] or slow["structure_break"]
+    dual_reversal = fast["opposite_reversal"] and slow["opposite_reversal"]
+
+    if structure_break or dual_reversal:
+        reason = "OPPOSITE_STRUCTURE_BREAK" if structure_break else "DUAL_OPPOSITE_REVERSAL"
+        return False, {
+            "reason": reason,
+            "fast": fast,
+            "slow": slow,
+            "mark_price": mark_price,
+        }
+
+    return True, {
+        "reason": "LIVE_ENTRY_GUARD_OK",
+        "fast": fast,
+        "slow": slow,
+        "mark_price": mark_price,
+    }
+
+
+def detect_liquidity_sweep(side, df, label):
+    if not config.SMC_ENABLED or not config.SMC_SWEEP_ENABLED:
+        return None
+
+    lookback = get_config_int("SMC_SWEEP_LOOKBACK", 24)
+    max_age = get_config_int("SMC_SWEEP_MAX_AGE", 5)
+    data = _closed_data(df)
+
+    if len(data) < lookback + 2:
+        return None
+
+    start = max(lookback, len(data) - max_age)
+    best = None
+
+    for pos in range(start, len(data)):
+        prior = data.iloc[pos - lookback:pos]
+        candle = data.iloc[pos]
+        atr = _candle_atr(candle)
+
+        if side == "BUY":
+            swept_level = prior["low"].min()
+            swept = candle["low"] < swept_level and candle["close"] > swept_level
+            direction_ok = _is_bullish(candle)
+            depth = (swept_level - candle["low"]) / atr
+        else:
+            swept_level = prior["high"].max()
+            swept = candle["high"] > swept_level and candle["close"] < swept_level
+            direction_ok = _is_bearish(candle)
+            depth = (candle["high"] - swept_level) / atr
+
+        if not swept or not direction_ok:
+            continue
+
+        recency = 1 - ((len(data) - 1 - pos) / max(max_age, 1))
+        volume_bonus = 0.25 if candle.get("volume", 0) > candle.get("volume_sma", 0) else 0
+        score = round(1 + max(depth, 0) + recency + volume_bonus, 2)
+        item = {
+            "type": "liquidity_sweep",
+            "source": label,
+            "level": float(swept_level),
+            "score": score,
+            "age": len(data) - 1 - pos,
+        }
+
+        if not best or item["score"] > best["score"]:
+            best = item
+
+    return best
+
+
+def _collect_order_blocks(df, side, label, timeframe_weight):
+    if not config.SMC_ENABLED or not config.SMC_OB_ENABLED:
+        return []
+
+    lookback = get_config_int("SMC_OB_LOOKBACK", 120)
+    min_displacement = get_config_float("SMC_OB_DISPLACEMENT_ATR", 0.8)
+    max_zone_pct = get_config_float("SMC_OB_MAX_ZONE_PCT", 4.0)
+    data = _closed_data(df, lookback)
+    blocks = []
+
+    if len(data) < 10:
+        return blocks
+
+    for pos in range(2, len(data) - 3):
+        candle = data.iloc[pos]
+        next_window = data.iloc[pos + 1:pos + 4]
+        atr = _candle_atr(candle)
+        zone_low = float(candle["low"])
+        zone_high = float(candle["high"])
+        zone_width_pct = ((zone_high - zone_low) / max(zone_high, 1e-10)) * 100
+
+        if zone_width_pct > max_zone_pct:
+            continue
+
+        if side == "BUY":
+            if not _is_bearish(candle):
+                continue
+
+            displacement = (next_window["close"].max() - candle["high"]) / atr
+            broke_structure = next_window["high"].max() > candle["high"]
+
+            if displacement < min_displacement or not broke_structure:
+                continue
+
+            anchor = zone_high
+        else:
+            if not _is_bullish(candle):
+                continue
+
+            displacement = (candle["low"] - next_window["close"].min()) / atr
+            broke_structure = next_window["low"].min() < candle["low"]
+
+            if displacement < min_displacement or not broke_structure:
+                continue
+
+            anchor = zone_low
+
+        recency_score = pos / len(data)
+        volume_bonus = 0.25 if candle.get("volume", 0) > candle.get("volume_sma", 0) else 0
+        score = timeframe_weight + min(max(displacement, 0), 2.5) + recency_score + volume_bonus
+        blocks.append({
+            "type": "order_block",
+            "source": f"{label}_ob",
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "level": float(anchor),
+            "score": round(score, 2),
+            "displacement": round(float(displacement), 2),
+        })
+
+    return blocks
+
+
+def find_order_block_confirmation(side, entry_price, trend_df, confirm_df, leverage=None):
+    zone_min, zone_max = _adverse_zone(side, entry_price, leverage)
+    candidates = []
+    candidates.extend(_collect_order_blocks(trend_df, side, "1d", 2.0))
+    candidates.extend(_collect_order_blocks(confirm_df, side, "4h", 1.25))
+    valid = []
+
+    for candidate in candidates:
+        if side == "BUY":
+            if candidate["level"] >= entry_price:
+                continue
+
+            if not (zone_min <= candidate["level"] <= zone_max):
+                continue
+        else:
+            if candidate["level"] <= entry_price:
+                continue
+
+            if not (zone_min <= candidate["level"] <= zone_max):
+                continue
+
+        distance_pct = pct_distance(entry_price, candidate["level"])
+        item = candidate.copy()
+        item["distance_pct"] = round(distance_pct, 2)
+        valid.append(item)
+
+    if not valid:
+        return None
+
+    valid.sort(key=lambda item: (item["score"], -item["distance_pct"]), reverse=True)
+    return valid[0]
+
+
+def _collect_fvgs(df, label):
+    if not config.SMC_ENABLED or not config.SMC_FVG_ENABLED:
+        return []
+
+    lookback = get_config_int("SMC_FVG_LOOKBACK", 120)
+    min_gap_atr = get_config_float("SMC_FVG_MIN_GAP_ATR", 0.12)
+    data = _closed_data(df, lookback)
+    fvgs = []
+
+    if len(data) < 5:
+        return fvgs
+
+    for pos in range(2, len(data)):
+        left = data.iloc[pos - 2]
+        right = data.iloc[pos]
+        atr = _candle_atr(right)
+
+        if left["high"] < right["low"]:
+            gap_low = float(left["high"])
+            gap_high = float(right["low"])
+            gap_atr = (gap_high - gap_low) / atr
+            after = data.iloc[pos + 1:]
+
+            if gap_atr >= min_gap_atr and not (
+                len(after) and after["low"].min() <= gap_low
+            ):
+                fvgs.append({
+                    "type": "bullish_fvg",
+                    "source": f"{label}_bullish_fvg",
+                    "zone_low": gap_low,
+                    "zone_high": gap_high,
+                    "level": (gap_low + gap_high) / 2,
+                    "score": round(1 + min(gap_atr, 2), 2),
+                })
+
+        if left["low"] > right["high"]:
+            gap_low = float(right["high"])
+            gap_high = float(left["low"])
+            gap_atr = (gap_high - gap_low) / atr
+            after = data.iloc[pos + 1:]
+
+            if gap_atr >= min_gap_atr and not (
+                len(after) and after["high"].max() >= gap_high
+            ):
+                fvgs.append({
+                    "type": "bearish_fvg",
+                    "source": f"{label}_bearish_fvg",
+                    "zone_low": gap_low,
+                    "zone_high": gap_high,
+                    "level": (gap_low + gap_high) / 2,
+                    "score": round(1 + min(gap_atr, 2), 2),
+                })
+
+    return fvgs
+
+
+def _estimated_tp_price(side, entry_price, trend_df, confirm_df):
+    if config.STATIC_TP_ENABLED:
+        roi = config.STATIC_TP_ROI
+        if side == "BUY":
+            return entry_price * (1 + (roi / config.LEVERAGE) / 100)
+
+        return entry_price * (1 - (roi / config.LEVERAGE) / 100)
+
+    target = find_structure_take_profit(
+        side,
+        entry_price,
+        trend_df,
+        confirm_df,
+        leverage=config.LEVERAGE
+    )
+
+    if target:
+        return target["target_price"]
+
+    roi = config.STRUCTURE_TP_FALLBACK_ROI
+
+    if side == "BUY":
+        return entry_price * (1 + (roi / config.LEVERAGE) / 100)
+
+    return entry_price * (1 - (roi / config.LEVERAGE) / 100)
+
+
+def find_fvg_confirmation(side, entry_price, trend_df, confirm_df, leverage=None):
+    zone_min, zone_max = _adverse_zone(side, entry_price, leverage)
+    target_price = _estimated_tp_price(side, entry_price, trend_df, confirm_df)
+    fvgs = []
+    fvgs.extend(_collect_fvgs(trend_df, "1d"))
+    fvgs.extend(_collect_fvgs(confirm_df, "4h"))
+    supportive = []
+    blocking = []
+
+    for fvg in fvgs:
+        if side == "BUY":
+            if (
+                fvg["type"] == "bullish_fvg"
+                and fvg["zone_high"] < entry_price
+                and zone_min <= fvg["level"] <= zone_max
+            ):
+                supportive.append(fvg)
+
+            if (
+                fvg["type"] == "bearish_fvg"
+                and entry_price < fvg["zone_low"] < target_price
+            ):
+                blocking.append(fvg)
+        else:
+            if (
+                fvg["type"] == "bearish_fvg"
+                and fvg["zone_low"] > entry_price
+                and zone_min <= fvg["level"] <= zone_max
+            ):
+                supportive.append(fvg)
+
+            if (
+                fvg["type"] == "bullish_fvg"
+                and target_price < fvg["zone_high"] < entry_price
+            ):
+                blocking.append(fvg)
+
+    supportive.sort(key=lambda item: item["score"], reverse=True)
+    blocking.sort(key=lambda item: item["score"], reverse=True)
+
+    return {
+        "supportive": supportive[0] if supportive else None,
+        "blocking": blocking[0] if blocking else None,
+        "target_price": target_price,
+    }
+
+
+def _smc_context_score(side, trend_df, confirm_df, entry_df):
+    if not config.SMC_ENABLED:
+        return 0, {"enabled": False}
+
+    entry_price = latest_closed(entry_df)["close"]
+    score = 0
+    context = {
+        "enabled": True,
+        "liquidity_sweep": None,
+        "order_block": None,
+        "fvg_support": None,
+        "fvg_block": None,
+    }
+
+    entry_sweep = detect_liquidity_sweep(side, entry_df, "1h")
+    confirm_sweep = detect_liquidity_sweep(side, confirm_df, "4h")
+    opposite_side = "SELL" if side == "BUY" else "BUY"
+    opposite_sweep = detect_liquidity_sweep(opposite_side, entry_df, "1h")
+
+    if entry_sweep:
+        context["liquidity_sweep"] = entry_sweep
+        score += min(entry_sweep["score"], 2.0)
+    elif confirm_sweep:
+        context["liquidity_sweep"] = confirm_sweep
+        score += min(confirm_sweep["score"], 1.25)
+
+    if opposite_sweep:
+        score -= min(opposite_sweep["score"], 1.25)
+
+    order_block = find_order_block_confirmation(
+        side,
+        entry_price,
+        trend_df,
+        confirm_df,
+        leverage=config.LEVERAGE
+    )
+
+    if order_block:
+        context["order_block"] = order_block
+        score += min(order_block["score"] / 2, 2.0)
+
+    fvg = find_fvg_confirmation(
+        side,
+        entry_price,
+        trend_df,
+        confirm_df,
+        leverage=config.LEVERAGE
+    )
+    context["fvg_support"] = fvg["supportive"]
+    context["fvg_block"] = fvg["blocking"]
+
+    if fvg["supportive"]:
+        score += min(fvg["supportive"]["score"] / 2, 1.0)
+
+    if fvg["blocking"]:
+        score -= get_config_float("SMC_TP_PATH_BLOCK_PENALTY", 1.5)
+
+    return round(score, 2), context
+
+
 def find_adverse_zone_level(side, entry_price, trend_df, confirm_df, leverage=None):
     leverage_to_use = leverage or config.LEVERAGE
     max_adverse_roi = abs(get_config_float("LONG_TERM_MAX_ADVERSE_ROI", 50))
@@ -603,6 +1104,7 @@ def _side_signal_score(
     entry_score, entry_ok, ema_distance = _entry_score(side, entry_df)
     btc_score = _btc_context_score(side, btc_trend, btc_corr, rs)
     participation_score = _futures_participation_score(side, participation)
+    smc_score, smc_context = _smc_context_score(side, trend_df, confirm_df, entry_df)
     level_score = 4 if level_ok else 0
 
     total = (
@@ -611,6 +1113,7 @@ def _side_signal_score(
         entry_score +
         btc_score +
         level_score +
+        smc_score +
         participation_score
     )
     hard_ok = trend_ok and confirm_ok and entry_ok and level_ok
@@ -625,6 +1128,8 @@ def _side_signal_score(
         "entry_score": entry_score,
         "btc_score": btc_score,
         "level_score": level_score,
+        "smc_score": smc_score,
+        "smc_context": smc_context,
         "participation_score": participation_score,
         "hard_ok": hard_ok,
         "trend_ok": trend_ok,
@@ -664,10 +1169,12 @@ def log_signal_analysis(analysis):
     log_info(
         f"BUY conf={buy.get('confidence', 0)}% hard={buy.get('hard_ok', False)} "
         f"level={buy.get('level_ok', False)} "
+        f"smc={buy.get('smc_score', 0)} "
         f"futures={buy.get('participation_score', 0)} | "
         f"SELL conf={sell.get('confidence', 0)}% "
         f"hard={sell.get('hard_ok', False)} "
         f"level={sell.get('level_ok', False)} "
+        f"smc={sell.get('smc_score', 0)} "
         f"futures={sell.get('participation_score', 0)}"
     )
 

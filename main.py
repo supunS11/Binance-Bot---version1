@@ -14,6 +14,7 @@ from exchange import (
     get_open_position_counts,
     get_supported_symbols,
     get_futures_participation,
+    get_mark_price,
     set_margin_type,
     setup_leverage,
     get_entry_price,
@@ -25,6 +26,7 @@ from strategy import (
     analyze_signal,
     log_signal_analysis,
     should_fetch_futures_context,
+    validate_live_entry_guard,
     validate_adverse_zone_level,
     validate_structure_take_profit
 )
@@ -354,6 +356,65 @@ def run_bot():
                     # PRICE (PRE-ENTRY)
                     # =========================
                     current_price = entry_df['close'].iloc[-2]
+
+                    # =========================
+                    # LIVE ENTRY REVERSAL GUARD
+                    # =========================
+                    if config.LIVE_ENTRY_CONFIRMATION_ENABLED:
+                        fast_guard_df = get_klines(
+                            symbol,
+                            config.LIVE_ENTRY_FAST_TIMEFRAME,
+                            config.LIVE_ENTRY_KLINE_LIMIT
+                        )
+                        slow_guard_df = get_klines(
+                            symbol,
+                            config.LIVE_ENTRY_SLOW_TIMEFRAME,
+                            config.LIVE_ENTRY_KLINE_LIMIT
+                        )
+                        mark_price = get_mark_price(symbol)
+
+                        if mark_price is not None:
+                            current_price = mark_price
+
+                        guard_ok, guard_info = validate_live_entry_guard(
+                            signal,
+                            fast_guard_df,
+                            slow_guard_df,
+                            mark_price
+                        )
+
+                        if not guard_ok:
+                            reason = guard_info.get("reason")
+                            fast = guard_info.get("fast", {})
+                            slow = guard_info.get("slow", {})
+                            log_warning(
+                                f"{symbol} LIVE ENTRY BLOCKED | {reason} | "
+                                f"FAST={fast.get('label')} "
+                                f"SB={fast.get('structure_break')} "
+                                f"REV={fast.get('opposite_reversal')} | "
+                                f"SLOW={slow.get('label')} "
+                                f"SB={slow.get('structure_break')} "
+                                f"REV={slow.get('opposite_reversal')}"
+                            )
+                            append_signal_journal(
+                                symbol,
+                                final_analysis,
+                                participation,
+                                trend_df,
+                                confirm_df,
+                                entry_df,
+                                btc_trend,
+                                btc_corr,
+                                rs,
+                                action="SKIPPED_LIVE_GUARD",
+                                skip_reason=reason
+                            )
+                            continue
+
+                        log_info(
+                            f"{symbol} LIVE ENTRY GUARD OK | "
+                            f"MARK={current_price} | {guard_info.get('reason')}"
+                        )
 
                     # =========================
                     # LONG-TERM ADVERSE-ZONE SUPPORT / RESISTANCE
