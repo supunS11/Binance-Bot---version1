@@ -351,6 +351,44 @@ def get_open_positions():
         return None
 
 
+def get_open_position_details(symbol=None):
+
+    try:
+        if symbol:
+            positions = client.futures_position_information(symbol=symbol)
+        else:
+            positions = client.futures_position_information()
+
+        open_positions = {}
+
+        for p in positions:
+            amount = float(p["positionAmt"])
+
+            if amount == 0:
+                continue
+
+            position_symbol = p["symbol"]
+            open_positions[position_symbol] = {
+                "symbol": position_symbol,
+                "amount": amount,
+                "side": "BUY" if amount > 0 else "SELL",
+                "quantity": abs(amount),
+                "entry_price": abs(_to_float(p.get("entryPrice"), 0) or 0),
+                "mark_price": abs(_to_float(p.get("markPrice"), 0) or 0),
+                "liquidation_price": abs(
+                    _to_float(p.get("liquidationPrice"), 0) or 0
+                ),
+                "unrealized_pnl": _to_float(p.get("unRealizedProfit"), 0) or 0,
+            }
+
+        return open_positions
+
+    except Exception as e:
+        label = symbol if symbol else "all"
+        log_error(f"{label} open position detail error: {e}")
+        return None
+
+
 def get_open_position_counts(open_positions=None):
 
     try:
@@ -384,6 +422,43 @@ def get_open_position_counts(open_positions=None):
     except Exception as e:
         log_error(f"position count error: {e}")
         return {"total": 0, "buy": 0, "sell": 0}
+
+
+def cancel_open_protection_orders(symbol):
+
+    try:
+        orders = client.futures_get_open_orders(symbol=symbol)
+        protection_types = {
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+            "STOP",
+            "STOP_MARKET",
+            "TRAILING_STOP_MARKET",
+        }
+        cancelled = 0
+
+        for order in orders:
+            order_type = order.get("type")
+            close_position = str(order.get("closePosition", "")).lower() == "true"
+            reduce_only = str(order.get("reduceOnly", "")).lower() == "true"
+
+            if order_type not in protection_types and not (close_position or reduce_only):
+                continue
+
+            client.futures_cancel_order(
+                symbol=symbol,
+                orderId=order["orderId"]
+            )
+            cancelled += 1
+
+        if cancelled:
+            log_info(f"{symbol} cancelled {cancelled} protection order(s)")
+
+        return True
+
+    except Exception as e:
+        log_error(f"{symbol} protection cancel error: {e}")
+        return False
 
 
 # =========================

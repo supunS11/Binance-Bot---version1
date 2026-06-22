@@ -21,6 +21,23 @@ def env_float(name, default):
     return float(value) if value not in (None, "") else default
 
 
+def env_float_list(name, default):
+    value = os.getenv(name)
+
+    if value in (None, ""):
+        return default
+
+    result = []
+
+    for item in value.split(","):
+        item = item.strip()
+
+        if item:
+            result.append(float(item))
+
+    return result or default
+
+
 API_KEY = os.getenv("API_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
@@ -122,6 +139,43 @@ STRUCTURE_TP_MIN_SCORE = env_float("STRUCTURE_TP_MIN_SCORE", 2.0)
 STRUCTURE_TP_BUFFER_PCT = env_float("STRUCTURE_TP_BUFFER_PCT", 0.15)
 STRUCTURE_TP_ATR_BUFFER_MULT = env_float("STRUCTURE_TP_ATR_BUFFER_MULT", 0.25)
 STRUCTURE_TP_FALLBACK_ROI = env_float("STRUCTURE_TP_FALLBACK_ROI", ROI_PERCENT_TP)
+ENTRY_TP_ROOM_CHECK_ENABLED = env_bool("ENTRY_TP_ROOM_CHECK_ENABLED", "True")
+ENTRY_MIN_TP_ROOM_ROI = env_float("ENTRY_MIN_TP_ROOM_ROI", STRUCTURE_TP_MIN_ROI)
+ENTRY_TP_ROOM_MIN_LEVEL_SCORE = env_float(
+    "ENTRY_TP_ROOM_MIN_LEVEL_SCORE",
+    STRUCTURE_TP_MIN_SCORE
+)
+ENTRY_TP_ROOM_BLOCK_IF_NO_LEVEL = env_bool(
+    "ENTRY_TP_ROOM_BLOCK_IF_NO_LEVEL",
+    "False"
+)
+
+DCA_ENABLED = env_bool("DCA_ENABLED", "False")
+DCA_MANAGE_EXISTING_POSITIONS = env_bool("DCA_MANAGE_EXISTING_POSITIONS", "False")
+DCA_STATE_PATH = os.getenv("DCA_STATE_PATH", "data/open_trades.json")
+DCA_MAX_ORDERS = env_int("DCA_MAX_ORDERS", 2)
+DCA_INITIAL_MARGIN_PCT = env_float("DCA_INITIAL_MARGIN_PCT", 50)
+DCA_MARGIN_PCTS = env_float_list("DCA_MARGIN_PCTS", [30, 20])
+DCA_TRIGGER_ROIS = env_float_list("DCA_TRIGGER_ROIS", [15, 30])
+DCA_MAX_ADVERSE_ROI = env_float("DCA_MAX_ADVERSE_ROI", 45)
+DCA_MIN_SECONDS_BETWEEN_ORDERS = env_int("DCA_MIN_SECONDS_BETWEEN_ORDERS", 3600)
+DCA_MIN_PRICE_GAP_ROI = env_float("DCA_MIN_PRICE_GAP_ROI", 8)
+DCA_REQUIRE_TREND_CONFIRMATION = env_bool("DCA_REQUIRE_TREND_CONFIRMATION", "True")
+DCA_REPRICE_TP_AFTER_FILL = env_bool("DCA_REPRICE_TP_AFTER_FILL", "True")
+DCA_STRUCTURE_LEVEL_ENABLED = env_bool("DCA_STRUCTURE_LEVEL_ENABLED", "True")
+DCA_STRUCTURE_MIN_SCORE = env_float("DCA_STRUCTURE_MIN_SCORE", 2.0)
+DCA_STRUCTURE_MAX_DISTANCE_ATR = env_float("DCA_STRUCTURE_MAX_DISTANCE_ATR", 0.6)
+DCA_STRUCTURE_MAX_DISTANCE_ROI = env_float("DCA_STRUCTURE_MAX_DISTANCE_ROI", 6)
+DCA_STRUCTURE_REQUIRE_REACTION = env_bool("DCA_STRUCTURE_REQUIRE_REACTION", "True")
+DCA_STRUCTURE_REACTION_LOOKBACK = env_int("DCA_STRUCTURE_REACTION_LOOKBACK", 3)
+DCA_STRUCTURE_REACTION_MIN_BODY_ATR = env_float(
+    "DCA_STRUCTURE_REACTION_MIN_BODY_ATR",
+    0.05
+)
+DCA_STRUCTURE_REACTION_CLOSE_POSITION = env_float(
+    "DCA_STRUCTURE_REACTION_CLOSE_POSITION",
+    0.55
+)
 
 # Default long-term behavior is no exchange SL. The adverse-zone support or
 # resistance check is used for trade quality, not as a mandatory stop order.

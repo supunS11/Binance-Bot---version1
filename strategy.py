@@ -322,6 +322,116 @@ def validate_structure_take_profit(side, entry_price, trend_df, confirm_df, leve
     }
 
 
+def find_nearest_profit_room_level(side, entry_price, trend_df, confirm_df, leverage=None):
+    if entry_price <= 0:
+        return None
+
+    leverage_to_use = leverage or config.LEVERAGE
+    target_side = "SELL" if side == "BUY" else "BUY"
+    min_score = get_config_float(
+        "ENTRY_TP_ROOM_MIN_LEVEL_SCORE",
+        get_config_float("STRUCTURE_TP_MIN_SCORE", 2.0)
+    )
+    buffer = _take_profit_buffer(entry_price, trend_df, confirm_df)
+
+    candidates = []
+    candidates.extend(_collect_pivot_levels(trend_df, target_side, "1d", 2.0))
+    candidates.extend(_collect_pivot_levels(confirm_df, target_side, "4h", 1.25))
+    candidates.extend(_collect_range_levels(trend_df, target_side, "1d", 2.0))
+    candidates.extend(_collect_range_levels(confirm_df, target_side, "4h", 1.25))
+    candidates.extend(_collect_ema_levels(trend_df, target_side, "1d", 2.0))
+    candidates.extend(_collect_ema_levels(confirm_df, target_side, "4h", 1.25))
+
+    tolerance = max(_level_tolerance(trend_df), _level_tolerance(confirm_df))
+    candidates = _dedupe_levels(candidates, tolerance)
+    valid = []
+
+    for candidate in candidates:
+        level = float(candidate["level"])
+
+        if candidate["score"] < min_score:
+            continue
+
+        if side == "BUY":
+            if level <= entry_price:
+                continue
+
+            target_price = level - buffer
+            raw_roi = ((level - entry_price) / entry_price) * leverage_to_use * 100
+            target_roi = (
+                ((target_price - entry_price) / entry_price) *
+                leverage_to_use *
+                100
+            )
+        else:
+            if level >= entry_price:
+                continue
+
+            target_price = level + buffer
+            raw_roi = ((entry_price - level) / entry_price) * leverage_to_use * 100
+            target_roi = (
+                ((entry_price - target_price) / entry_price) *
+                leverage_to_use *
+                100
+            )
+
+        item = candidate.copy()
+        item["raw_level"] = level
+        item["target_price"] = float(target_price)
+        item["raw_level_roi"] = round(float(raw_roi), 2)
+        item["target_roi"] = round(float(target_roi), 2)
+        item["buffer"] = round(float(buffer), 8)
+        valid.append(item)
+
+    if not valid:
+        return None
+
+    valid.sort(key=lambda item: (item["raw_level_roi"], -item["score"]))
+    return valid[0]
+
+
+def validate_entry_profit_room(side, entry_price, trend_df, confirm_df, leverage=None):
+    if not getattr(config, "ENTRY_TP_ROOM_CHECK_ENABLED", True):
+        return True, {"reason": "ENTRY_TP_ROOM_CHECK_DISABLED"}
+
+    min_roi = get_config_float(
+        "ENTRY_MIN_TP_ROOM_ROI",
+        get_config_float("STRUCTURE_TP_MIN_ROI", 8)
+    )
+    level = find_nearest_profit_room_level(
+        side,
+        entry_price,
+        trend_df,
+        confirm_df,
+        leverage=leverage
+    )
+    label = "RESISTANCE" if side == "BUY" else "SUPPORT"
+
+    if not level:
+        if getattr(config, "ENTRY_TP_ROOM_BLOCK_IF_NO_LEVEL", False):
+            return False, {
+                "reason": f"NO {label} PROFIT ROOM LEVEL FOUND"
+            }
+
+        return True, {
+            "reason": f"NO CLEAR {label} FOUND; PROFIT ROOM ALLOWED"
+        }
+
+    if level["target_roi"] < min_roi:
+        return False, {
+            "reason": (
+                f"TOO CLOSE TO {label} | "
+                f"ROOM={level['target_roi']}% < MIN={min_roi}%"
+            ),
+            **level
+        }
+
+    return True, {
+        "reason": "ENTRY_PROFIT_ROOM_OK",
+        **level
+    }
+
+
 def _closed_data(df, lookback=None):
     data = df.iloc[:-1].copy() if len(df) > 1 else df.copy()
 
@@ -898,6 +1008,289 @@ def validate_adverse_zone_level(side, entry_price, trend_df, confirm_df, leverag
     label = "support" if side == "BUY" else "resistance"
     return False, {
         "reason": f"NO STRONG {label.upper()} WITHIN -{zone_roi:.0f}% ROI ZONE"
+    }
+
+
+def _dca_structure_tolerance(current_price, entry_df, leverage=None):
+    leverage_to_use = leverage or config.LEVERAGE
+    atr_tolerance = _average_range(entry_df, 14) * get_config_float(
+        "DCA_STRUCTURE_MAX_DISTANCE_ATR",
+        0.6
+    )
+    roi_tolerance = current_price * (
+        get_config_float("DCA_STRUCTURE_MAX_DISTANCE_ROI", 6) /
+        max(leverage_to_use, 1) /
+        100
+    )
+
+    return max(atr_tolerance, roi_tolerance, current_price * 0.001)
+
+
+def _normalise_dca_level(side, current_price, candidate, tolerance, leverage=None):
+    leverage_to_use = leverage or config.LEVERAGE
+    level = float(candidate.get("level", 0) or 0)
+
+    if level <= 0:
+        return None
+
+    zone_low = float(candidate.get("zone_low", level) or level)
+    zone_high = float(candidate.get("zone_high", level) or level)
+
+    if zone_low > zone_high:
+        zone_low, zone_high = zone_high, zone_low
+
+    if side == "BUY":
+        if current_price < zone_low - tolerance:
+            return None
+
+        distance = max(0, current_price - zone_high)
+    else:
+        if current_price > zone_high + tolerance:
+            return None
+
+        distance = max(0, zone_low - current_price)
+
+    if distance > tolerance:
+        return None
+
+    proximity_score = 1 - min(distance / max(tolerance, 1e-10), 1)
+    distance_roi = (distance / current_price) * leverage_to_use * 100
+    item = candidate.copy()
+    item["level"] = level
+    item["zone_low"] = zone_low
+    item["zone_high"] = zone_high
+    item["distance"] = round(float(distance), 8)
+    item["distance_roi"] = round(float(distance_roi), 2)
+    item["score"] = round(float(candidate.get("score", 0)) + proximity_score, 2)
+    item["max_distance"] = round(float(tolerance), 8)
+
+    return item
+
+
+def _collect_dca_structure_candidates(side, trend_df, confirm_df):
+    candidates = []
+
+    for item in _collect_pivot_levels(trend_df, side, "1d", 2.0):
+        candidate = item.copy()
+        candidate["kind"] = "pivot"
+        candidates.append(candidate)
+
+    for item in _collect_pivot_levels(confirm_df, side, "4h", 1.25):
+        candidate = item.copy()
+        candidate["kind"] = "pivot"
+        candidates.append(candidate)
+
+    for item in _collect_range_levels(trend_df, side, "1d", 2.0):
+        candidate = item.copy()
+        candidate["kind"] = "range"
+        candidates.append(candidate)
+
+    for item in _collect_range_levels(confirm_df, side, "4h", 1.25):
+        candidate = item.copy()
+        candidate["kind"] = "range"
+        candidates.append(candidate)
+
+    for item in _collect_ema_levels(trend_df, side, "1d", 2.0):
+        candidate = item.copy()
+        candidate["kind"] = "ema"
+        candidates.append(candidate)
+
+    for item in _collect_ema_levels(confirm_df, side, "4h", 1.25):
+        candidate = item.copy()
+        candidate["kind"] = "ema"
+        candidates.append(candidate)
+
+    for item in _collect_order_blocks(trend_df, side, "1d", 2.0):
+        candidate = item.copy()
+        candidate["kind"] = "order_block"
+        candidate["score"] = float(candidate.get("score", 0)) + 0.5
+        candidates.append(candidate)
+
+    for item in _collect_order_blocks(confirm_df, side, "4h", 1.25):
+        candidate = item.copy()
+        candidate["kind"] = "order_block"
+        candidate["score"] = float(candidate.get("score", 0)) + 0.5
+        candidates.append(candidate)
+
+    for fvg in _collect_fvgs(trend_df, "1d"):
+        if side == "BUY" and fvg["type"] != "bullish_fvg":
+            continue
+
+        if side == "SELL" and fvg["type"] != "bearish_fvg":
+            continue
+
+        candidate = fvg.copy()
+        candidate["kind"] = "fvg"
+        candidate["score"] = float(candidate.get("score", 0)) + 0.25
+        candidates.append(candidate)
+
+    for fvg in _collect_fvgs(confirm_df, "4h"):
+        if side == "BUY" and fvg["type"] != "bullish_fvg":
+            continue
+
+        if side == "SELL" and fvg["type"] != "bearish_fvg":
+            continue
+
+        candidate = fvg.copy()
+        candidate["kind"] = "fvg"
+        candidate["score"] = float(candidate.get("score", 0)) + 0.25
+        candidates.append(candidate)
+
+    return candidates
+
+
+def _level_touched_by_candle(side, candle, level, tolerance):
+    zone_low = float(level.get("zone_low", level.get("level")))
+    zone_high = float(level.get("zone_high", level.get("level")))
+
+    if side == "BUY":
+        return float(candle["low"]) <= zone_high + tolerance
+
+    return float(candle["high"]) >= zone_low - tolerance
+
+
+def _dca_reaction_confirmation(side, level, entry_df, tolerance):
+    if not getattr(config, "DCA_STRUCTURE_REQUIRE_REACTION", True):
+        return True, {
+            "reaction": "REACTION_NOT_REQUIRED"
+        }
+
+    lookback = get_config_int("DCA_STRUCTURE_REACTION_LOOKBACK", 3)
+    min_body_atr = get_config_float("DCA_STRUCTURE_REACTION_MIN_BODY_ATR", 0.05)
+    close_position_threshold = get_config_float(
+        "DCA_STRUCTURE_REACTION_CLOSE_POSITION",
+        0.55
+    )
+    data = _closed_data(entry_df, lookback)
+
+    if len(data) == 0:
+        return False, {
+            "reason": "DCA_STRUCTURE_REACTION_DATA_UNAVAILABLE"
+        }
+
+    best = None
+
+    for _, candle in data.iterrows():
+        if not _level_touched_by_candle(side, candle, level, tolerance):
+            continue
+
+        atr = _candle_atr(candle)
+        body_atr = _body(candle) / atr
+        close_position = _close_position(candle)
+        close = float(candle["close"])
+        zone_low = float(level.get("zone_low", level.get("level")))
+        zone_high = float(level.get("zone_high", level.get("level")))
+
+        if side == "BUY":
+            reclaimed_level = close >= zone_low
+            reaction_ok = (
+                reclaimed_level
+                and
+                close_position >= close_position_threshold
+                and (
+                    _is_bullish(candle)
+                    or body_atr >= min_body_atr
+                )
+            )
+        else:
+            reclaimed_level = close <= zone_high
+            reaction_ok = (
+                reclaimed_level
+                and
+                close_position <= 1 - close_position_threshold
+                and (
+                    _is_bearish(candle)
+                    or body_atr >= min_body_atr
+                )
+            )
+
+        item = {
+            "close_position": round(float(close_position), 2),
+            "body_atr": round(float(body_atr), 2),
+            "candle_close": close,
+            "reclaimed_level": reclaimed_level,
+            "reaction": "OK" if reaction_ok else "WEAK",
+        }
+
+        if reaction_ok:
+            return True, item
+
+        best = item
+
+    if best:
+        best["reason"] = "DCA_STRUCTURE_REACTION_WEAK"
+        return False, best
+
+    return False, {
+        "reason": "DCA_STRUCTURE_LEVEL_NOT_TOUCHED"
+    }
+
+
+def validate_dca_structure_level(side, current_price, trend_df, confirm_df, entry_df, leverage=None):
+    if not getattr(config, "DCA_STRUCTURE_LEVEL_ENABLED", True):
+        return True, {
+            "reason": "DCA_STRUCTURE_LEVEL_CHECK_DISABLED",
+            "level": current_price,
+            "source": "disabled",
+            "score": 0,
+        }
+
+    if current_price <= 0:
+        return False, {
+            "reason": "DCA_STRUCTURE_INVALID_PRICE"
+        }
+
+    min_score = get_config_float("DCA_STRUCTURE_MIN_SCORE", 2.0)
+    tolerance = _dca_structure_tolerance(
+        current_price,
+        entry_df,
+        leverage=leverage
+    )
+    levels = []
+
+    for candidate in _collect_dca_structure_candidates(side, trend_df, confirm_df):
+        level = _normalise_dca_level(
+            side,
+            current_price,
+            candidate,
+            tolerance,
+            leverage=leverage
+        )
+
+        if not level:
+            continue
+
+        if level["score"] < min_score:
+            continue
+
+        levels.append(level)
+
+    if not levels:
+        label = "SUPPORT" if side == "BUY" else "RESISTANCE"
+        return False, {
+            "reason": f"NO DCA {label} LEVEL NEAR CURRENT PRICE"
+        }
+
+    levels.sort(key=lambda item: (item["score"], -item["distance"]), reverse=True)
+    best = levels[0]
+    reaction_ok, reaction = _dca_reaction_confirmation(
+        side,
+        best,
+        entry_df,
+        tolerance
+    )
+
+    if not reaction_ok:
+        return False, {
+            "reason": reaction.get("reason", "DCA_STRUCTURE_REACTION_FAILED"),
+            **best,
+            **reaction,
+        }
+
+    return True, {
+        "reason": "DCA_STRUCTURE_LEVEL_OK",
+        **best,
+        **reaction,
     }
 
 
