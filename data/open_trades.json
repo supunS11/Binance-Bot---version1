@@ -75,31 +75,6 @@
       "updated_at": "2026-06-22T13:39:17",
       "used_margin": 2.5
     },
-    "AKTUSDT": {
-      "avg_entry": 0.7581,
-      "dca_count": 0,
-      "initial_entry": 0.7581,
-      "last_dca_at": null,
-      "last_dca_price": null,
-      "level_info": {
-        "adverse_roi": -23.55,
-        "level": 0.7223,
-        "score": 61.34,
-        "source": "1d_pivot",
-        "touches": 30,
-        "zone_max": 0.758,
-        "zone_min": 0.6822
-      },
-      "managed_by_bot": true,
-      "opened_at": "2026-06-22T13:39:06",
-      "planned_margin": 5.0,
-      "quantity": 16.5,
-      "reference_price": 0.7223,
-      "side": "BUY",
-      "symbol": "AKTUSDT",
-      "updated_at": "2026-06-22T13:39:06",
-      "used_margin": 2.5
-    },
     "ALGOUSDT": {
       "avg_entry": 0.0894,
       "dca_count": 0,
