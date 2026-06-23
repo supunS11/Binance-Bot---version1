@@ -697,7 +697,16 @@ def place_algo_order(**params):
 # =========================
 # TP/SL EXECUTION (CLEAN VERSION)
 # =========================
-def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, structure_tp=None):
+def place_tp_sl(
+    symbol,
+    side,
+    entry_price,
+    quantity,
+    confirm_df,
+    structure_tp=None,
+    roi_override=None,
+    roi_mode_label=None
+):
 
     try:
         precision = get_price_precision(symbol)
@@ -730,7 +739,15 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, structure_tp=No
 
             close_side = SIDE_BUY
 
-        if config.STATIC_TP_ENABLED:
+        if roi_override is not None:
+            tp_mode = roi_mode_label or f"ROI_{roi_override}%"
+            tp_price = get_roi_take_profit(
+                side,
+                entry_price,
+                roi_override,
+                precision
+            )
+        elif config.STATIC_TP_ENABLED:
             tp_mode = f"STATIC_ROI_{config.STATIC_TP_ROI}%"
             tp_price = get_roi_take_profit(
                 side,

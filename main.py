@@ -293,6 +293,8 @@ def log_active_dca_config():
         f"INITIAL_MARGIN={config.DCA_INITIAL_MARGIN_PCT}% | "
         f"LEVELS={' | '.join(levels) if levels else 'NONE'} | "
         f"REPRICE_TP={config.DCA_REPRICE_TP_AFTER_FILL} | "
+        f"TP_MODE={config.DCA_TP_MODE} | "
+        f"TP_ROI={config.DCA_TP_ROI}% | "
         f"WEBSOCKET={config.DCA_WEBSOCKET_ENABLED}"
     )
 
@@ -1070,8 +1072,15 @@ def manage_dca_position(
         btc_corr, rs = calculate_btc_context(symbol, trend_df, btc_trend_df)
 
     structure_tp = None
+    dca_tp_roi = None
 
-    if not config.STATIC_TP_ENABLED and trend_df is not None and confirm_df is not None:
+    if config.DCA_TP_MODE in ("roi", "fixed_roi", "fallback_roi"):
+        dca_tp_roi = config.DCA_TP_ROI
+        log_info(
+            f"{symbol} DCA ROI TP | "
+            f"ROI={dca_tp_roi}% | AVG_ENTRY={avg_entry}"
+        )
+    elif not config.STATIC_TP_ENABLED and trend_df is not None and confirm_df is not None:
         tp_ok, structure_tp = validate_structure_take_profit(
             side,
             avg_entry,
@@ -1105,7 +1114,13 @@ def manage_dca_position(
                 avg_entry,
                 total_quantity,
                 confirm_df,
-                structure_tp=structure_tp
+                structure_tp=structure_tp,
+                roi_override=dca_tp_roi,
+                roi_mode_label=(
+                    f"DCA_ROI_{dca_tp_roi}%"
+                    if dca_tp_roi is not None
+                    else None
+                )
             )
 
             if not protection_ok:
