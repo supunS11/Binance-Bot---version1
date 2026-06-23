@@ -1007,9 +1007,37 @@ def run_bot():
                     log_info(f"{symbol} SIGNAL: {signal}")
 
                     # =========================
-                    # POSITION LIMITS
+                    # LIVE POSITION LIMITS
                     # =========================
+                    latest_position_details = get_open_position_details()
+
+                    if latest_position_details is None:
+                        log_warning(
+                            f"{symbol} live position snapshot unavailable; "
+                            f"skipping entry"
+                        )
+                        continue
+
+                    position_details = latest_position_details
+                    open_positions = get_open_position_amounts(position_details)
+                    prune_closed_positions(trade_state, open_positions)
+
+                    if symbol in open_positions:
+                        manage_dca_position(
+                            symbol,
+                            trade_state,
+                            position_details[symbol],
+                            btc_trend_df,
+                            btc_trend
+                        )
+                        continue
+
                     counts = get_open_position_counts(open_positions)
+                    log_info(
+                        f"{symbol} LIVE POSITION COUNT | "
+                        f"TOTAL={counts['total']} | "
+                        f"BUY={counts['buy']} | SELL={counts['sell']}"
+                    )
 
                     if config.MAX_TOTAL_POSITIONS and counts['total'] >= config.MAX_TOTAL_POSITIONS:
                         log_warning(
