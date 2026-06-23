@@ -35,6 +35,7 @@ from strategy import (
 )
 from risk_management import calculate_position_size
 from signal_journal import append_signal_journal
+from news_service import apply_news_filter
 from trade_state import (
     create_position_state,
     get_position_state,
@@ -991,6 +992,35 @@ def run_bot():
                         )
                         continue
 
+                    news_ok, final_analysis, news_context = apply_news_filter(
+                        symbol,
+                        signal,
+                        final_analysis
+                    )
+                    signal = final_analysis["signal"]
+
+                    if not news_ok:
+                        log_warning(
+                            f"{symbol} SKIP | {news_context.get('reason')} | "
+                            f"NEWS={news_context.get('label')} "
+                            f"SCORE={news_context.get('score')}"
+                        )
+                        append_signal_journal(
+                            symbol,
+                            final_analysis,
+                            participation,
+                            trend_df,
+                            confirm_df,
+                            entry_df,
+                            btc_trend,
+                            btc_corr,
+                            rs,
+                            action="SKIPPED_NEWS_FILTER",
+                            skip_reason=news_context.get("reason"),
+                            news_context=news_context
+                        )
+                        continue
+
                     append_signal_journal(
                         symbol,
                         final_analysis,
@@ -1001,10 +1031,16 @@ def run_bot():
                         btc_trend,
                         btc_corr,
                         rs,
-                        action="SIGNAL"
+                        action="SIGNAL",
+                        news_context=news_context
                     )
 
-                    log_info(f"{symbol} SIGNAL: {signal}")
+                    log_info(
+                        f"{symbol} SIGNAL: {signal} | "
+                        f"NEWS={news_context.get('action')} "
+                        f"{news_context.get('label')} "
+                        f"SCORE={news_context.get('score')}"
+                    )
 
                     # =========================
                     # LIVE POSITION LIMITS
@@ -1092,7 +1128,8 @@ def run_bot():
                                 btc_corr,
                                 rs,
                                 action="SKIPPED_LIVE_GUARD",
-                                skip_reason=guard_info.get("reason")
+                                skip_reason=guard_info.get("reason"),
+                                news_context=news_context
                             )
                             continue
 
@@ -1127,7 +1164,8 @@ def run_bot():
                             btc_corr,
                             rs,
                             action="SKIPPED_PROFIT_ROOM",
-                            skip_reason=room_info.get("reason")
+                            skip_reason=room_info.get("reason"),
+                            news_context=news_context
                         )
                         continue
 
@@ -1295,7 +1333,8 @@ def run_bot():
                         btc_trend,
                         btc_corr,
                         rs,
-                        action="TRADE_OPENED"
+                        action="TRADE_OPENED",
+                        news_context=news_context
                     )
 
                     # =========================

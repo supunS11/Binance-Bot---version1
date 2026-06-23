@@ -51,6 +51,13 @@ FIELDNAMES = [
     "global_long_short_ratio",
     "top_long_short_ratio",
     "funding_rate",
+    "news_available",
+    "news_score",
+    "news_label",
+    "news_action",
+    "news_reason",
+    "news_headline",
+    "news_source",
     "skip_reason",
 ]
 
@@ -114,7 +121,8 @@ def append_signal_journal(
     btc_corr,
     rs,
     action,
-    skip_reason=""
+    skip_reason="",
+    news_context=None
 ):
     if not config.SIGNAL_JOURNAL_ENABLED:
         return
@@ -126,6 +134,7 @@ def append_signal_journal(
         buy = analysis.get("buy", {})
         sell = analysis.get("sell", {})
         participation = participation or {}
+        news_context = news_context or {}
         row = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "symbol": symbol,
@@ -171,6 +180,13 @@ def append_signal_journal(
             "global_long_short_ratio": participation.get("global_long_short_ratio", ""),
             "top_long_short_ratio": participation.get("top_long_short_ratio", ""),
             "funding_rate": participation.get("funding_rate", ""),
+            "news_available": news_context.get("available", ""),
+            "news_score": news_context.get("score", ""),
+            "news_label": news_context.get("label", ""),
+            "news_action": news_context.get("action", ""),
+            "news_reason": news_context.get("reason", ""),
+            "news_headline": news_context.get("headline", ""),
+            "news_source": news_context.get("source", ""),
             "skip_reason": skip_reason,
         }
 
