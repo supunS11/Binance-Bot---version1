@@ -99,6 +99,19 @@ def _change_pct(items, field):
     return round(((last - first) / first) * 100, 2)
 
 
+def _get_taker_longshort_ratio(params):
+    method = getattr(client, "futures_taker_longshort_ratio", None)
+
+    if method:
+        return method(**params)
+
+    return client._request_futures_data_api(
+        "get",
+        "takerlongshortRatio",
+        data=params
+    )
+
+
 def get_futures_participation(symbol):
     if not config.FUTURES_CONTEXT_ENABLED:
         return {"available": False, "reason": "DISABLED"}
@@ -136,7 +149,7 @@ def get_futures_participation(symbol):
         data["errors"].append(f"OI:{e}")
 
     try:
-        taker = _latest_item(client.futures_taker_longshort_ratio(**params))
+        taker = _latest_item(_get_taker_longshort_ratio(params))
         data["taker_buy_sell_ratio"] = _to_float(
             taker.get("buySellRatio") if taker else None
         )
@@ -424,6 +437,44 @@ def get_open_position_counts(open_positions=None):
         return {"total": 0, "buy": 0, "sell": 0}
 
 
+def _get_open_algo_orders(symbol):
+    method = getattr(client, "futures_get_open_algo_orders", None)
+
+    if method:
+        return method(symbol=symbol)
+
+    return client._request_futures_api(
+        "get",
+        "openAlgoOrders",
+        True,
+        data={"symbol": symbol}
+    )
+
+
+def _cancel_algo_order(symbol, algo_id):
+    method = getattr(client, "futures_cancel_algo_order", None)
+
+    if method:
+        return method(symbol=symbol, algoId=algo_id)
+
+    return client._request_futures_api(
+        "delete",
+        "algoOrder",
+        True,
+        data={
+            "symbol": symbol,
+            "algoId": algo_id,
+        }
+    )
+
+
+def _normalise_algo_orders(response):
+    if isinstance(response, dict):
+        return response.get("orders") or response.get("data") or []
+
+    return response or []
+
+
 def cancel_open_protection_orders(symbol):
 
     try:
@@ -454,46 +505,26 @@ def cancel_open_protection_orders(symbol):
         if cancelled:
             log_info(f"{symbol} cancelled {cancelled} protection order(s)")
 
-        try:
-            algo_orders = client._request_futures_api(
-                "get",
-                "openAlgoOrders",
-                True,
-                data={"symbol": symbol}
-            )
+        algo_orders = _normalise_algo_orders(_get_open_algo_orders(symbol))
+        algo_cancelled = 0
 
-            if isinstance(algo_orders, dict):
-                algo_orders = algo_orders.get("orders") or algo_orders.get("data") or []
+        for order in algo_orders:
+            order_type = order.get("orderType") or order.get("type")
 
-            algo_cancelled = 0
+            if order_type not in protection_types:
+                continue
 
-            for order in algo_orders or []:
-                order_type = order.get("orderType") or order.get("type")
+            algo_id = order.get("algoId")
 
-                if order_type not in protection_types:
-                    continue
+            if not algo_id:
+                log_warning(f"{symbol} algo protection missing algoId; cancel unsafe")
+                return False
 
-                algo_id = order.get("algoId")
+            _cancel_algo_order(symbol, algo_id)
+            algo_cancelled += 1
 
-                if not algo_id:
-                    continue
-
-                client._request_futures_api(
-                    "delete",
-                    "algoOrder",
-                    True,
-                    data={
-                        "symbol": symbol,
-                        "algoId": algo_id,
-                    }
-                )
-                algo_cancelled += 1
-
-            if algo_cancelled:
-                log_info(f"{symbol} cancelled {algo_cancelled} algo protection order(s)")
-
-        except Exception as e:
-            log_warning(f"{symbol} algo protection cancel warning: {e}")
+        if algo_cancelled:
+            log_info(f"{symbol} cancelled {algo_cancelled} algo protection order(s)")
 
         return True
 
@@ -635,6 +666,11 @@ def is_valid_take_profit(side, tp_price, market_price):
 
 
 def place_algo_order(**params):
+    method = getattr(client, "futures_create_algo_order", None)
+
+    if method:
+        return method(**params)
+
     return client._request_futures_api(
         "post",
         "algoOrder",
@@ -754,7 +790,7 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, structure_tp=No
             triggerPrice=tp_price,
             closePosition="true",
             workingType="MARK_PRICE",
-            priceProtect="true"
+            priceProtect="TRUE"
         )
         log_info(
             f"{symbol} TP order response | "
@@ -776,7 +812,7 @@ def place_tp_sl(symbol, side, entry_price, quantity, confirm_df, structure_tp=No
                 triggerPrice=sl_price,
                 closePosition="true",
                 workingType="MARK_PRICE",
-                priceProtect="true"
+                priceProtect="TRUE"
             )
             log_info(
                 f"{symbol} SL order response | "

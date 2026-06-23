@@ -261,6 +261,30 @@ def log_profit_room_ok(symbol, side, room_info, prefix=""):
     )
 
 
+def log_active_dca_config():
+    if not config.DCA_ENABLED:
+        log_info("DCA disabled")
+        return
+
+    max_levels = min(
+        config.DCA_MAX_ORDERS,
+        len(config.DCA_TRIGGER_ROIS),
+        len(config.DCA_MARGIN_PCTS)
+    )
+    levels = [
+        f"L{index + 1}:ROI={config.DCA_TRIGGER_ROIS[index]}%,"
+        f"MARGIN={config.DCA_MARGIN_PCTS[index]}%"
+        for index in range(max_levels)
+    ]
+
+    log_info(
+        "DCA ROI ladder active | "
+        f"INITIAL_MARGIN={config.DCA_INITIAL_MARGIN_PCT}% | "
+        f"LEVELS={' | '.join(levels) if levels else 'NONE'} | "
+        f"REPRICE_TP={config.DCA_REPRICE_TP_AFTER_FILL}"
+    )
+
+
 def log_dca_structure_level(symbol, side, level_info):
     label = "SUPPORT" if side == "BUY" else "RESISTANCE"
     log_info(
@@ -1054,6 +1078,11 @@ def manage_dca_position(symbol, state, position_detail, btc_trend_df, btc_trend)
 
             if not protection_ok:
                 log_warning(f"{symbol} DCA TP ORDER NOT CREATED")
+        else:
+            log_warning(
+                f"{symbol} DCA TP reprice skipped | "
+                f"existing protection cancel failed"
+            )
 
     append_signal_journal(
         symbol,
@@ -1093,6 +1122,7 @@ def run_bot():
         f"KLINE_LIMIT={config.KLINE_LIMIT} | "
         f"THROTTLE={config.REQUEST_THROTTLE_SECONDS}s"
     )
+    log_active_dca_config()
 
     while True:
 

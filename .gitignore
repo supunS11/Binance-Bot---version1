@@ -18,6 +18,11 @@ __pycache__/
 logs/
 *.log
 
+# Runtime bot state
+data/open_trades.json
+data/signal_journal.csv
+data/news_cache.json
+
 # OS files
 .DS_Store
 Thumbs.db

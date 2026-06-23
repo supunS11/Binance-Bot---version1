@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -83,7 +84,7 @@ def _load_cache():
     path = _cache_path()
 
     if not path.exists():
-        return {"items": {}}
+        return {"items": {}, "provider_items": {}}
 
     try:
         with path.open("r", encoding="utf-8") as file:
@@ -92,11 +93,14 @@ def _load_cache():
         if "items" not in cache:
             cache["items"] = {}
 
+        if "provider_items" not in cache:
+            cache["provider_items"] = {}
+
         return cache
 
     except Exception as e:
         log_error(f"news cache load error: {e}")
-        return {"items": {}}
+        return {"items": {}, "provider_items": {}}
 
 
 def _save_cache(cache):
@@ -124,6 +128,63 @@ def _base_asset(symbol):
             return value[len(prefix):]
 
     return value
+
+
+def _asset_terms(asset):
+    value = (asset or "").upper().strip()
+
+    if len(value) < 2:
+        return set()
+
+    if not re.fullmatch(r"[A-Z0-9]+", value):
+        return set()
+
+    return {value}
+
+
+def _text_tokens(*values):
+    text = " ".join(str(value or "") for value in values).upper()
+    return set(re.findall(r"[A-Z0-9]{2,30}", text))
+
+
+def _cryptocompare_provider_items(cache, now):
+    provider_cache = cache.setdefault("provider_items", {})
+    cached = provider_cache.get("cryptocompare")
+
+    if cached and now - float(cached.get("fetched_at", 0)) < config.NEWS_CACHE_SECONDS:
+        return cached.get("items", []), ""
+
+    if requests is None:
+        return None, "NEWS_REQUESTS_PACKAGE_MISSING"
+
+    if not config.NEWS_API_KEY:
+        return None, "NEWS_API_KEY_MISSING"
+
+    params = {
+        "lang": "EN",
+        "api_key": config.NEWS_API_KEY,
+    }
+    headers = {
+        "authorization": f"Apikey {config.NEWS_API_KEY}",
+    }
+    response = requests.get(
+        "https://min-api.cryptocompare.com/data/v2/news/",
+        params=params,
+        headers=headers,
+        timeout=config.NEWS_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if payload.get("Response") == "Error":
+        return None, payload.get("Message") or "CRYPTOCOMPARE_ERROR"
+
+    items = payload.get("Data", [])
+    provider_cache["cryptocompare"] = {
+        "fetched_at": now,
+        "items": items,
+    }
+    return items, ""
 
 
 def _empty_context(symbol, reason, enabled=None):
@@ -205,43 +266,28 @@ def _cryptopanic_items(asset):
     return payload.get("results", []), ""
 
 
-def _cryptocompare_items(asset):
-    if requests is None:
-        return None, "NEWS_REQUESTS_PACKAGE_MISSING"
+def _cryptocompare_items(asset, cache, now):
+    asset_terms = _asset_terms(asset)
 
-    if not config.NEWS_API_KEY:
-        return None, "NEWS_API_KEY_MISSING"
+    if not asset_terms:
+        return [], "NEWS_SYMBOL_UNSUPPORTED"
 
-    params = {
-        "lang": "EN",
-        "api_key": config.NEWS_API_KEY,
-    }
-    headers = {
-        "authorization": f"Apikey {config.NEWS_API_KEY}",
-    }
-    response = requests.get(
-        "https://min-api.cryptocompare.com/data/v2/news/",
-        params=params,
-        headers=headers,
-        timeout=config.NEWS_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    items, reason = _cryptocompare_provider_items(cache, now)
 
-    if payload.get("Response") == "Error":
-        return None, payload.get("Message") or "CRYPTOCOMPARE_ERROR"
+    if items is None:
+        return None, reason
 
-    items = payload.get("Data", [])
-    asset_text = asset.lower()
     filtered = []
 
     for item in items:
-        title = (item.get("title") or "").lower()
-        body = (item.get("body") or "").lower()
-        categories = (item.get("categories") or "").lower()
-        tags = f"{title} {body} {categories}"
+        tokens = _text_tokens(
+            item.get("title"),
+            item.get("body"),
+            item.get("categories"),
+            item.get("tags")
+        )
 
-        if asset_text in tags:
+        if tokens.intersection(asset_terms):
             filtered.append({
                 "title": item.get("title") or "",
                 "url": item.get("url") or "",
@@ -256,14 +302,14 @@ def _cryptocompare_items(asset):
     return filtered, ""
 
 
-def _fetch_items(asset):
+def _fetch_items(asset, cache, now):
     provider = config.NEWS_PROVIDER.lower()
 
     if provider == "cryptopanic":
         return _cryptopanic_items(asset)
 
     if provider == "cryptocompare":
-        return _cryptocompare_items(asset)
+        return _cryptocompare_items(asset, cache, now)
 
     return None, f"NEWS_PROVIDER_UNSUPPORTED:{config.NEWS_PROVIDER}"
 
@@ -360,7 +406,7 @@ def get_news_context(symbol):
         return cached.get("context") or _empty_context(symbol, "NEWS_CACHE_EMPTY")
 
     try:
-        items, reason = _fetch_items(asset)
+        items, reason = _fetch_items(asset, cache, now)
 
         if items is None:
             context = _empty_context(symbol, reason or "NEWS_FETCH_UNAVAILABLE")
@@ -374,6 +420,15 @@ def get_news_context(symbol):
                     f"backoff={config.NEWS_RATE_LIMIT_BACKOFF_SECONDS}s"
                 )
         else:
+            if reason:
+                context = _empty_context(symbol, reason)
+                cache["items"][symbol] = {
+                    "fetched_at": now,
+                    "context": context,
+                }
+                _save_cache(cache)
+                return context
+
             context = _summarise(symbol, items)
             cache["provider_backoff_until"] = 0
 

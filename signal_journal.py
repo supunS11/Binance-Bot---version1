@@ -1,9 +1,10 @@
 import csv
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 import config
-from logger import log_error
+from logger import log_error, log_info
 
 
 FIELDNAMES = [
@@ -71,6 +72,40 @@ def _journal_path():
     return path
 
 
+def _ensure_journal_header(path):
+    if not path.exists() or path.stat().st_size == 0:
+        return True
+
+    with path.open("r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        existing_fields = reader.fieldnames or []
+
+        if existing_fields == FIELDNAMES:
+            return False
+
+        rows = []
+
+        for row in reader:
+            cleaned = {
+                field: row.get(field, "")
+                for field in FIELDNAMES
+            }
+            rows.append(cleaned)
+
+    backup = path.with_name(
+        f"{path.stem}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}{path.suffix}"
+    )
+    shutil.copy2(path, backup)
+
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    log_info(f"signal journal header migrated; backup={backup.name}")
+    return False
+
+
 def _latest_close(df):
     try:
         candle = df.iloc[-2] if len(df) > 1 else df.iloc[-1]
@@ -130,7 +165,7 @@ def append_signal_journal(
     try:
         path = _journal_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
+        write_header = _ensure_journal_header(path)
         buy = analysis.get("buy", {})
         sell = analysis.get("sell", {})
         participation = participation or {}
