@@ -577,7 +577,8 @@ def manage_dca_position(symbol, state, position_detail, btc_trend_df, btc_trend)
         current_price,
         trend_df,
         confirm_df,
-        leverage=config.LEVERAGE
+        leverage=config.LEVERAGE,
+        min_roi_override=config.DCA_MIN_TP_ROOM_ROI
     )
 
     if not room_ok:

@@ -390,13 +390,24 @@ def find_nearest_profit_room_level(side, entry_price, trend_df, confirm_df, leve
     return valid[0]
 
 
-def validate_entry_profit_room(side, entry_price, trend_df, confirm_df, leverage=None):
+def validate_entry_profit_room(
+    side,
+    entry_price,
+    trend_df,
+    confirm_df,
+    leverage=None,
+    min_roi_override=None
+):
     if not getattr(config, "ENTRY_TP_ROOM_CHECK_ENABLED", True):
         return True, {"reason": "ENTRY_TP_ROOM_CHECK_DISABLED"}
 
-    min_roi = get_config_float(
-        "ENTRY_MIN_TP_ROOM_ROI",
-        get_config_float("STRUCTURE_TP_MIN_ROI", 8)
+    min_roi = (
+        min_roi_override
+        if min_roi_override is not None
+        else get_config_float(
+            "ENTRY_MIN_TP_ROOM_ROI",
+            get_config_float("STRUCTURE_TP_MIN_ROI", 8)
+        )
     )
     level = find_nearest_profit_room_level(
         side,

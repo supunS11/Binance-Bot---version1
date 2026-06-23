@@ -176,6 +176,7 @@ DCA_STRUCTURE_REACTION_CLOSE_POSITION = env_float(
     "DCA_STRUCTURE_REACTION_CLOSE_POSITION",
     0.55
 )
+DCA_MIN_TP_ROOM_ROI = env_float("DCA_MIN_TP_ROOM_ROI", ENTRY_MIN_TP_ROOM_ROI)
 
 # Default long-term behavior is no exchange SL. The adverse-zone support or
 # resistance check is used for trade quality, not as a mandatory stop order.
