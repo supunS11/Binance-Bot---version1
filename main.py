@@ -411,7 +411,7 @@ def get_updated_position_after_fill(symbol, old_avg, old_quantity, fill_price, f
     return avg_entry, total_quantity, None
 
 
-def manage_dca_position(symbol, state, position_detail, btc_trend_df, btc_trend):
+def _manage_dca_position_legacy(symbol, state, position_detail, btc_trend_df, btc_trend):
     if not config.DCA_ENABLED:
         log_warning(f"{symbol} already has open position")
         return
@@ -839,6 +839,244 @@ def manage_dca_position(symbol, state, position_detail, btc_trend_df, btc_trend)
         f"DCA_COUNT: "
         f"{dca_count + (get_remaining_dca_order_count(dca_count) if force_remaining_dca else 1)}"
         f"/{config.DCA_MAX_ORDERS}\n"
+        f"ADVERSE_ROI_AT_TRIGGER: {adverse_roi}%\n"
+    )
+
+    if updated_position:
+        position_detail.update(updated_position)
+
+
+def manage_dca_position(symbol, state, position_detail, btc_trend_df, btc_trend):
+    if not config.DCA_ENABLED:
+        log_warning(f"{symbol} already has open position")
+        return
+
+    position_state = get_position_state(state, symbol)
+
+    if not position_state:
+        position_state = adopt_existing_position_state(
+            state,
+            symbol,
+            position_detail
+        )
+
+    if not position_state or not position_state.get("managed_by_bot"):
+        log_warning(f"{symbol} open position is not bot-managed; DCA skipped")
+        return
+
+    side = position_state.get("side") or position_detail.get("side")
+
+    if side not in ("BUY", "SELL"):
+        log_warning(f"{symbol} DCA skipped | invalid side in state")
+        return
+
+    live_side = position_detail.get("side")
+
+    if live_side and live_side != side:
+        log_warning(
+            f"{symbol} DCA skipped | state side {side} != live side {live_side}"
+        )
+        return
+
+    dca_count = int(position_state.get("dca_count", 0) or 0)
+    dca_margin = get_dca_order_margin(dca_count)
+    trigger_roi = get_dca_trigger_roi(dca_count)
+
+    if dca_margin <= 0 or trigger_roi is None:
+        log_info(f"{symbol} DCA complete or not configured")
+        return
+
+    avg_entry = float(
+        position_detail.get("entry_price") or
+        position_state.get("avg_entry") or
+        0
+    )
+    old_quantity = abs(float(position_detail.get("amount", 0)))
+    current_price = get_mark_price(symbol)
+
+    if avg_entry <= 0 or old_quantity <= 0 or current_price is None:
+        log_warning(f"{symbol} DCA skipped | position price unavailable")
+        return
+
+    adverse_roi = get_position_adverse_roi(side, avg_entry, current_price)
+
+    if adverse_roi < trigger_roi:
+        log_info(
+            f"{symbol} DCA not triggered | "
+            f"LEVEL={dca_count + 1} | "
+            f"ADVERSE_ROI={adverse_roi}% < TRIGGER={trigger_roi}%"
+        )
+        return
+
+    last_order_at = (
+        position_state.get("last_dca_at") or
+        position_state.get("opened_at")
+    )
+    elapsed = seconds_since(last_order_at)
+
+    if (
+        config.DCA_MIN_SECONDS_BETWEEN_ORDERS > 0
+        and elapsed is not None
+        and elapsed < config.DCA_MIN_SECONDS_BETWEEN_ORDERS
+    ):
+        remaining = int(config.DCA_MIN_SECONDS_BETWEEN_ORDERS - elapsed)
+        log_info(f"{symbol} DCA waiting cooldown | {remaining}s remaining")
+        return
+
+    level_info = {
+        "reason": "ROI_LADDER_DCA",
+        "level": current_price,
+        "source": "roi_ladder",
+        "dca_level": dca_count + 1,
+        "trigger_roi": trigger_roi,
+        "adverse_roi": adverse_roi,
+        "margin": dca_margin,
+    }
+
+    log_warning(
+        f"{symbol} ROI LADDER DCA TRIGGERED | "
+        f"LEVEL={dca_count + 1}/{config.DCA_MAX_ORDERS} | "
+        f"ADVERSE_ROI={adverse_roi}% >= TRIGGER={trigger_roi}% | "
+        f"MARGIN={dca_margin}"
+    )
+
+    balance = get_balance()
+    quantity = calculate_position_size(
+        balance,
+        current_price,
+        current_price,
+        symbol,
+        dca_margin
+    )
+
+    if quantity <= 0:
+        log_warning(f"{symbol} DCA skipped | invalid quantity")
+        return
+
+    notional_ok, notional = validate_min_notional(
+        symbol,
+        quantity,
+        current_price
+    )
+
+    if not notional_ok:
+        log_warning(f"{symbol} DCA skipped | notional too low: {notional}")
+        return
+
+    if not set_margin_type(symbol):
+        return
+
+    if not setup_leverage(symbol):
+        return
+
+    order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
+    order = place_market_order(symbol, order_side, quantity)
+
+    if not order:
+        return
+
+    fill_price = get_entry_price(symbol, order)
+
+    if fill_price <= 0:
+        fill_price = current_price
+        log_warning(f"{symbol} DCA fill price unavailable | using current price")
+
+    avg_entry, total_quantity, updated_position = get_updated_position_after_fill(
+        symbol,
+        avg_entry,
+        old_quantity,
+        fill_price,
+        quantity
+    )
+
+    record_dca_fill(
+        state,
+        symbol,
+        avg_entry,
+        total_quantity,
+        dca_margin,
+        fill_price,
+        level_info
+    )
+
+    trend_df, confirm_df, entry_df = get_signal_frames(symbol, btc_trend_df)
+    btc_corr = ""
+    rs = ""
+    analysis = {
+        "signal": f"DCA_LEVEL_{dca_count + 1}",
+        "best_side": side,
+        "best_confidence": "",
+        "buy": {},
+        "sell": {},
+    }
+
+    if trend_df is not None and confirm_df is not None and entry_df is not None:
+        btc_corr, rs = calculate_btc_context(symbol, trend_df, btc_trend_df)
+
+    structure_tp = None
+
+    if not config.STATIC_TP_ENABLED and trend_df is not None and confirm_df is not None:
+        tp_ok, structure_tp = validate_structure_take_profit(
+            side,
+            avg_entry,
+            trend_df,
+            confirm_df,
+            leverage=config.LEVERAGE
+        )
+
+        if tp_ok:
+            log_info(
+                f"{symbol} DCA STRUCTURE TP | "
+                f"TARGET={structure_tp['target_price']} | "
+                f"ROI={structure_tp['target_roi']}% | "
+                f"SRC={structure_tp['source']}"
+            )
+        else:
+            log_warning(
+                f"{symbol} DCA {structure_tp['reason']} | "
+                f"USING FALLBACK ROI TP"
+            )
+    elif not config.STATIC_TP_ENABLED:
+        log_warning(
+            f"{symbol} DCA using fallback ROI TP | signal frames unavailable"
+        )
+
+    if config.DCA_REPRICE_TP_AFTER_FILL:
+        if cancel_open_protection_orders(symbol):
+            protection_ok = place_tp_sl(
+                symbol,
+                order_side,
+                avg_entry,
+                total_quantity,
+                confirm_df,
+                structure_tp=structure_tp
+            )
+
+            if not protection_ok:
+                log_warning(f"{symbol} DCA TP ORDER NOT CREATED")
+
+    append_signal_journal(
+        symbol,
+        analysis,
+        None,
+        trend_df,
+        confirm_df,
+        entry_df,
+        btc_trend,
+        btc_corr,
+        rs,
+        action="DCA_FILLED"
+    )
+
+    log_info(
+        f"*** {symbol} DCA FILLED ***\n"
+        f"SIDE: {side}\n"
+        f"LEVEL: {dca_count + 1}/{config.DCA_MAX_ORDERS}\n"
+        f"FILL: {fill_price}\n"
+        f"AVG_ENTRY: {avg_entry}\n"
+        f"QTY_TOTAL: {total_quantity}\n"
+        f"DCA_MARGIN: {dca_margin}\n"
+        f"DCA_COUNT: {dca_count + 1}/{config.DCA_MAX_ORDERS}\n"
         f"ADVERSE_ROI_AT_TRIGGER: {adverse_roi}%\n"
     )
 

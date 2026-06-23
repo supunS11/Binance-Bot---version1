@@ -145,7 +145,13 @@ def _empty_context(symbol, reason, enabled=None):
 
 def _is_rate_limit_reason(reason):
     text = str(reason or "").lower()
-    return "rate limit" in text or "too many" in text or "429" in text
+    return (
+        "rate limit" in text
+        or "rate_limit" in text
+        or "rate-limit" in text
+        or "too many" in text
+        or "429" in text
+    )
 
 
 def _keyword_score(title):
@@ -410,7 +416,12 @@ def apply_news_filter(symbol, side, analysis):
         return True, analysis, context
 
     if not context.get("available"):
-        log_warning(f"{symbol} NEWS unavailable | {context.get('reason')}")
+        reason = context.get("reason")
+
+        if _is_rate_limit_reason(reason):
+            return True, analysis, context
+
+        log_warning(f"{symbol} NEWS unavailable | {reason}")
         return True, analysis, context
 
     score = float(context.get("score", 0) or 0)

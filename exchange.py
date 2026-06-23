@@ -454,6 +454,47 @@ def cancel_open_protection_orders(symbol):
         if cancelled:
             log_info(f"{symbol} cancelled {cancelled} protection order(s)")
 
+        try:
+            algo_orders = client._request_futures_api(
+                "get",
+                "openAlgoOrders",
+                True,
+                data={"symbol": symbol}
+            )
+
+            if isinstance(algo_orders, dict):
+                algo_orders = algo_orders.get("orders") or algo_orders.get("data") or []
+
+            algo_cancelled = 0
+
+            for order in algo_orders or []:
+                order_type = order.get("orderType") or order.get("type")
+
+                if order_type not in protection_types:
+                    continue
+
+                algo_id = order.get("algoId")
+
+                if not algo_id:
+                    continue
+
+                client._request_futures_api(
+                    "delete",
+                    "algoOrder",
+                    True,
+                    data={
+                        "symbol": symbol,
+                        "algoId": algo_id,
+                    }
+                )
+                algo_cancelled += 1
+
+            if algo_cancelled:
+                log_info(f"{symbol} cancelled {algo_cancelled} algo protection order(s)")
+
+        except Exception as e:
+            log_warning(f"{symbol} algo protection cancel warning: {e}")
+
         return True
 
     except Exception as e:
