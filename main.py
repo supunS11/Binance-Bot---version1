@@ -1272,8 +1272,41 @@ class DcaWebsocketMonitor:
 
         self.socket_key = None
 
+    def _restart_manager_locked(self):
+        if not self.enabled:
+            return False
+
+        try:
+            from binance import ThreadedWebsocketManager
+
+            if self.twm:
+                try:
+                    self.twm.stop()
+                except Exception as e:
+                    log_warning(f"DCA websocket manager stop warning: {e}")
+
+            self.twm = ThreadedWebsocketManager(
+                api_key=config.API_KEY,
+                api_secret=config.SECRET_KEY
+            )
+            self.twm.start()
+            self.running = True
+            log_info("DCA websocket manager restarted")
+            return True
+
+        except Exception as e:
+            self.running = False
+            self.twm = None
+            self.socket_key = None
+            log_error(f"DCA websocket manager restart error: {e}")
+            return False
+
     def _subscribe_locked(self, streams, reason):
         self.streams = streams
+        if not self.twm:
+            log_error("DCA websocket subscription failed: websocket manager unavailable")
+            self.streams = ()
+            return
 
         if not streams:
             log_info("DCA websocket monitor idle | no open positions")
@@ -1337,6 +1370,7 @@ class DcaWebsocketMonitor:
                     f"STREAMS={len(streams)}"
                 )
                 self._stop_socket_locked()
+                self._restart_manager_locked()
                 self.streams = ()
                 self._subscribe_locked(streams, "reset")
 
