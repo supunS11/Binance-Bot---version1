@@ -42,6 +42,18 @@ def add_score(score, condition, points):
     return score + points if condition else score
 
 
+def _safe_float(value, default=0):
+    try:
+        result = float(value)
+
+        if result != result:
+            return default
+
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
 def get_structure_stop_loss(df, side):
     try:
         candle = latest_closed(df)
@@ -1305,6 +1317,162 @@ def validate_dca_structure_level(side, current_price, trend_df, confirm_df, entr
     }
 
 
+def _candle_quality_score(side, candle, max_ema_distance):
+    open_price = _safe_float(candle.get("open"))
+    high = _safe_float(candle.get("high"))
+    low = _safe_float(candle.get("low"))
+    close = _safe_float(candle.get("close"))
+    atr = max(_safe_float(candle.get("atr")), 1e-10)
+    ema20 = _safe_float(candle.get("ema20"))
+    volume = _safe_float(candle.get("volume"))
+    volume_sma = _safe_float(candle.get("volume_sma"))
+    rsi = _safe_float(candle.get("rsi"), 50)
+    candle_range = max(high - low, 1e-10)
+    body = abs(close - open_price)
+    close_position = (close - low) / candle_range
+    directional_close = close_position if side == "BUY" else 1 - close_position
+    upper_wick = max(high - max(open_price, close), 0)
+    lower_wick = max(min(open_price, close) - low, 0)
+    rejection_wick = upper_wick if side == "BUY" else lower_wick
+    rejection_wick_ratio = rejection_wick / candle_range
+    body_ratio = body / candle_range
+    directional_body = close - open_price if side == "BUY" else open_price - close
+    momentum_atr = directional_body / atr
+    candle_atr = candle_range / atr
+    volume_mult = volume / volume_sma if volume_sma > 0 else 0
+    ema_distance = pct_distance(close, ema20) if ema20 else 0
+    chase_atr = abs(close - ema20) / atr if ema20 else 0
+    min_body = get_config_float("MIN_SIGNAL_BODY_RATIO", 0.16)
+    min_close = get_config_float("MIN_SIGNAL_CLOSE_POSITION", 0.50)
+    max_close = get_config_float("MAX_SIGNAL_CLOSE_POSITION", 0.88)
+    max_candle_atr = get_config_float("MAX_SIGNAL_CANDLE_ATR", 2.0)
+    min_volume_mult = get_config_float("MIN_VOLUME_SMA_MULT", 1.05)
+    max_wick_ratio = get_config_float("MAX_SIGNAL_REJECTION_WICK_RATIO", 0.45)
+    min_momentum_atr = get_config_float("MIN_SIGNAL_MOMENTUM_ATR", 0.03)
+    max_chase_pct = get_config_float("MAX_CHASE_DISTANCE_PCT", max_ema_distance)
+    max_late_entry_atr = get_config_float("MAX_LATE_ENTRY_ATR", 2.2)
+    late_penalty = get_config_float("LATE_ENTRY_SCORE_PENALTY", 2.0)
+    wick_filter = bool(getattr(config, "SIGNAL_WICK_FILTER_ENABLED", True))
+    score = 0
+
+    score += 0.5 if body_ratio >= min_body else -0.5
+    score += 0.5 if directional_close >= min_close else -0.75
+    score += 0.25 if directional_close <= max_close else -0.25
+
+    if wick_filter:
+        score += 0.5 if rejection_wick_ratio <= max_wick_ratio else -1.0
+
+    score += 0.25 if candle_atr <= max_candle_atr else -1.0
+    score += 0.5 if momentum_atr >= min_momentum_atr else -0.25
+    score += 0.5 if volume_mult >= min_volume_mult else -0.25
+    score += 0.25 if ema_distance <= max_ema_distance else -0.75
+
+    if max_chase_pct > 0:
+        score += 0.25 if ema_distance <= max_chase_pct else -0.5
+
+    if max_late_entry_atr > 0:
+        score += 0.25 if chase_atr <= max_late_entry_atr else -late_penalty
+
+    overheat = (
+        (side == "BUY" and rsi > get_config_float("BUY_RSI_OVERHEAT", 72)) or
+        (side == "SELL" and rsi < get_config_float("SELL_RSI_OVERHEAT", 28))
+    )
+
+    if overheat:
+        score -= 1.0
+
+    quality_ok = (
+        not overheat and
+        candle_atr <= max(max_candle_atr * 1.75, max_candle_atr + 1) and
+        (
+            not wick_filter or
+            rejection_wick_ratio <= max(max_wick_ratio * 1.75, 0.80)
+        )
+    )
+
+    return round(score, 2), {
+        "score": round(score, 2),
+        "body_ratio": round(float(body_ratio), 3),
+        "directional_close": round(float(directional_close), 3),
+        "rejection_wick_ratio": round(float(rejection_wick_ratio), 3),
+        "volume_mult": round(float(volume_mult), 2),
+        "candle_atr": round(float(candle_atr), 2),
+        "momentum_atr": round(float(momentum_atr), 3),
+        "ema_distance": round(float(ema_distance), 3),
+        "chase_atr": round(float(chase_atr), 2),
+        "rsi": round(float(rsi), 2),
+        "overheat": overheat,
+        "quality_ok": quality_ok,
+    }
+
+
+def _market_regime_score(side, trend_df, confirm_df, entry_df):
+    trend = latest_closed(trend_df)
+    confirm = latest_closed(confirm_df)
+    entry = latest_closed(entry_df)
+    confirm_structure = detect_market_structure(confirm_df)
+    trend_adx = _safe_float(trend.get("adx"))
+    confirm_adx = _safe_float(confirm.get("adx"))
+    sideways_adx = get_config_float("SIDEWAYS_ADX", 15)
+    trending_adx = get_config_float("TRENDING_ADX", 25)
+    atr = max(_safe_float(entry.get("atr")), 1e-10)
+    entry_close = _safe_float(entry.get("close"))
+    entry_ema20 = _safe_float(entry.get("ema20"))
+    chase_atr = abs(entry_close - entry_ema20) / atr if entry_ema20 else 0
+    max_late_entry_atr = get_config_float("MAX_LATE_ENTRY_ATR", 2.2)
+
+    if side == "BUY":
+        trend_aligned = (
+            trend["close"] > trend["ema50"] and trend["ema50"] >= trend["ema200"]
+        )
+        confirm_aligned = (
+            confirm["close"] > confirm["ema50"] and confirm["ema20"] >= confirm["ema50"]
+        )
+        breakout = confirm_structure["bullish_breakout"]
+    else:
+        trend_aligned = (
+            trend["close"] < trend["ema50"] and trend["ema50"] <= trend["ema200"]
+        )
+        confirm_aligned = (
+            confirm["close"] < confirm["ema50"] and confirm["ema20"] <= confirm["ema50"]
+        )
+        breakout = confirm_structure["bearish_breakdown"]
+
+    if chase_atr > max_late_entry_atr:
+        regime = "late_entry"
+    elif trend_adx < sideways_adx and confirm_adx < sideways_adx:
+        regime = "sideways"
+    elif trend_adx >= trending_adx or confirm_adx >= trending_adx:
+        regime = "trending"
+    elif breakout:
+        regime = "breakout"
+    else:
+        regime = "transition"
+
+    score = 0
+
+    if regime == "late_entry":
+        score -= get_config_float("LATE_ENTRY_SCORE_PENALTY", 2.0)
+    elif regime == "sideways":
+        score += 0.5 if breakout else -1.0
+    elif regime == "trending":
+        score += 1.0 if trend_aligned and confirm_aligned else -1.25
+    elif regime == "breakout":
+        score += 0.75 if confirm_aligned else 0
+    elif trend_aligned and confirm_aligned:
+        score += 0.25
+
+    return round(score, 2), {
+        "regime": regime,
+        "trend_adx": round(float(trend_adx), 2),
+        "confirm_adx": round(float(confirm_adx), 2),
+        "trend_aligned": trend_aligned,
+        "confirm_aligned": confirm_aligned,
+        "breakout": breakout,
+        "chase_atr": round(float(chase_atr), 2),
+    }
+
+
 def _trend_bias_score(side, trend_df):
     trend = latest_closed(trend_df)
     prev = previous_closed(trend_df)
@@ -1348,6 +1516,7 @@ def _confirmation_score(side, confirm_df):
     prev = previous_closed(confirm_df)
     structure = detect_market_structure(confirm_df)
     min_adx = get_config_float("LONG_TERM_MIN_ADX", 14)
+    max_ema_distance = get_config_float("MAX_SIGNAL_EMA20_DISTANCE_PCT", 1.2)
     score = 0
     hard_ok = False
 
@@ -1378,14 +1547,25 @@ def _confirmation_score(side, confirm_df):
             and (confirm["macd"] < confirm["macd_signal"] or confirm["rsi"] < 50)
         )
 
-    return score, hard_ok
+    quality_score, quality = _candle_quality_score(
+        side,
+        confirm,
+        max_ema_distance
+    )
+    score += quality_score
+    hard_ok = hard_ok and quality["quality_ok"]
+
+    return round(score, 2), hard_ok, quality
 
 
 def _entry_score(side, entry_df):
     entry = latest_closed(entry_df)
     prev = previous_closed(entry_df)
     ema_distance = pct_distance(entry["close"], entry["ema20"])
-    max_ema_distance = get_config_float("LONG_TERM_ENTRY_MAX_EMA_DISTANCE_PCT", 6)
+    max_ema_distance = get_config_float(
+        "MAX_ENTRY_EMA20_DISTANCE_PCT",
+        get_config_float("LONG_TERM_ENTRY_MAX_EMA_DISTANCE_PCT", 6)
+    )
     score = 0
     hard_ok = False
 
@@ -1410,7 +1590,15 @@ def _entry_score(side, entry_df):
         score = add_score(score, entry["volume"] > entry["volume_sma"], 1)
         hard_ok = entry["close"] < entry["ema20"] and ema_distance <= max_ema_distance
 
-    return score, hard_ok, ema_distance
+    quality_score, quality = _candle_quality_score(
+        side,
+        entry,
+        max_ema_distance
+    )
+    score += quality_score
+    hard_ok = hard_ok and quality["quality_ok"]
+
+    return round(score, 2), hard_ok, ema_distance, quality
 
 
 def _btc_context_score(side, btc_trend, btc_corr, rs):
@@ -1504,11 +1692,22 @@ def _side_signal_score(
         confirm_df
     )
     trend_score, trend_ok = _trend_bias_score(side, trend_df)
-    confirm_score, confirm_ok = _confirmation_score(side, confirm_df)
-    entry_score, entry_ok, ema_distance = _entry_score(side, entry_df)
+    confirm_score, confirm_ok, confirm_quality = _confirmation_score(side, confirm_df)
+    entry_score, entry_ok, ema_distance, entry_quality = _entry_score(side, entry_df)
     btc_score = _btc_context_score(side, btc_trend, btc_corr, rs)
     participation_score = _futures_participation_score(side, participation)
     smc_score, smc_context = _smc_context_score(side, trend_df, confirm_df, entry_df)
+    regime_score, regime_context = _market_regime_score(
+        side,
+        trend_df,
+        confirm_df,
+        entry_df
+    )
+    quality_score = round(
+        float(confirm_quality.get("score", 0)) +
+        float(entry_quality.get("score", 0)),
+        2
+    )
     level_score = 4 if level_ok else 0
 
     total = (
@@ -1518,7 +1717,8 @@ def _side_signal_score(
         btc_score +
         level_score +
         smc_score +
-        participation_score
+        participation_score +
+        regime_score
     )
     hard_ok = trend_ok and confirm_ok and entry_ok and level_ok
 
@@ -1534,6 +1734,11 @@ def _side_signal_score(
         "level_score": level_score,
         "smc_score": smc_score,
         "smc_context": smc_context,
+        "quality_score": quality_score,
+        "confirm_quality": confirm_quality,
+        "entry_quality": entry_quality,
+        "regime_score": regime_score,
+        "regime_context": regime_context,
         "participation_score": participation_score,
         "hard_ok": hard_ok,
         "trend_ok": trend_ok,
@@ -1573,11 +1778,17 @@ def log_signal_analysis(analysis):
     log_info(
         f"BUY conf={buy.get('confidence', 0)}% hard={buy.get('hard_ok', False)} "
         f"level={buy.get('level_ok', False)} "
+        f"quality={buy.get('quality_score', 0)} "
+        f"regime={buy.get('regime_context', {}).get('regime', '')}:"
+        f"{buy.get('regime_score', 0)} "
         f"smc={buy.get('smc_score', 0)} "
         f"futures={buy.get('participation_score', 0)} | "
         f"SELL conf={sell.get('confidence', 0)}% "
         f"hard={sell.get('hard_ok', False)} "
         f"level={sell.get('level_ok', False)} "
+        f"quality={sell.get('quality_score', 0)} "
+        f"regime={sell.get('regime_context', {}).get('regime', '')}:"
+        f"{sell.get('regime_score', 0)} "
         f"smc={sell.get('smc_score', 0)} "
         f"futures={sell.get('participation_score', 0)}"
     )
@@ -1687,8 +1898,21 @@ def should_fetch_futures_context(analysis):
 
     buy = analysis.get("buy", {})
     sell = analysis.get("sell", {})
+    best_key = (analysis.get("best_side") or "").lower()
+    best = analysis.get(best_key, {}) if best_key in ("buy", "sell") else {}
 
-    return bool(buy.get("level_ok") or sell.get("level_ok"))
+    if best:
+        return bool(
+            best.get("level_ok") and
+            best.get("trend_ok") and
+            best.get("confirm_ok") and
+            best.get("entry_ok")
+        )
+
+    return bool(
+        (buy.get("level_ok") and buy.get("hard_ok")) or
+        (sell.get("level_ok") and sell.get("hard_ok"))
+    )
 
 
 def check_signal(trend_df, confirm_df, entry_df, btc_trend, btc_corr, rs):

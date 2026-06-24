@@ -24,6 +24,20 @@ FIELDNAMES = [
     "sell_smc_score",
     "buy_participation_score",
     "sell_participation_score",
+    "buy_quality_score",
+    "sell_quality_score",
+    "buy_regime_score",
+    "sell_regime_score",
+    "buy_regime",
+    "sell_regime",
+    "buy_entry_quality_ok",
+    "sell_entry_quality_ok",
+    "buy_entry_chase_atr",
+    "sell_entry_chase_atr",
+    "buy_entry_rejection_wick",
+    "sell_entry_rejection_wick",
+    "buy_entry_volume_mult",
+    "sell_entry_volume_mult",
     "buy_hard_ok",
     "sell_hard_ok",
     "buy_level_ok",
@@ -76,6 +90,10 @@ def _ensure_journal_header(path):
     if not path.exists() or path.stat().st_size == 0:
         return True
 
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup = path.with_name(f"{path.stem}.bak_{stamp}{path.suffix}")
+    temp_path = path.with_name(f"{path.stem}.tmp_{stamp}{path.suffix}")
+
     with path.open("r", newline="", encoding="utf-8") as file:
         reader = csv.DictReader(file)
         existing_fields = reader.fieldnames or []
@@ -83,24 +101,19 @@ def _ensure_journal_header(path):
         if existing_fields == FIELDNAMES:
             return False
 
-        rows = []
+        with temp_path.open("w", newline="", encoding="utf-8") as temp_file:
+            writer = csv.DictWriter(temp_file, fieldnames=FIELDNAMES)
+            writer.writeheader()
 
-        for row in reader:
-            cleaned = {
-                field: row.get(field, "")
-                for field in FIELDNAMES
-            }
-            rows.append(cleaned)
+            for row in reader:
+                cleaned = {
+                    field: row.get(field, "")
+                    for field in FIELDNAMES
+                }
+                writer.writerow(cleaned)
 
-    backup = path.with_name(
-        f"{path.stem}.bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}{path.suffix}"
-    )
     shutil.copy2(path, backup)
-
-    with path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(rows)
+    temp_path.replace(path)
 
     log_info(f"signal journal header migrated; backup={backup.name}")
     return False
@@ -145,6 +158,19 @@ def _smc_source(side, key):
     return item.get("source", "")
 
 
+def _nested_value(side, parent, key, default=""):
+    if not side:
+        return default
+
+    item = side.get(parent) or {}
+
+    if not item:
+        return default
+
+    value = item.get(key, default)
+    return default if value is None else value
+
+
 def append_signal_journal(
     symbol,
     analysis,
@@ -187,6 +213,52 @@ def append_signal_journal(
             "sell_smc_score": _side_value(sell, "smc_score"),
             "buy_participation_score": _side_value(buy, "participation_score"),
             "sell_participation_score": _side_value(sell, "participation_score"),
+            "buy_quality_score": _side_value(buy, "quality_score"),
+            "sell_quality_score": _side_value(sell, "quality_score"),
+            "buy_regime_score": _side_value(buy, "regime_score"),
+            "sell_regime_score": _side_value(sell, "regime_score"),
+            "buy_regime": _nested_value(buy, "regime_context", "regime"),
+            "sell_regime": _nested_value(sell, "regime_context", "regime"),
+            "buy_entry_quality_ok": _nested_value(
+                buy,
+                "entry_quality",
+                "quality_ok"
+            ),
+            "sell_entry_quality_ok": _nested_value(
+                sell,
+                "entry_quality",
+                "quality_ok"
+            ),
+            "buy_entry_chase_atr": _nested_value(
+                buy,
+                "entry_quality",
+                "chase_atr"
+            ),
+            "sell_entry_chase_atr": _nested_value(
+                sell,
+                "entry_quality",
+                "chase_atr"
+            ),
+            "buy_entry_rejection_wick": _nested_value(
+                buy,
+                "entry_quality",
+                "rejection_wick_ratio"
+            ),
+            "sell_entry_rejection_wick": _nested_value(
+                sell,
+                "entry_quality",
+                "rejection_wick_ratio"
+            ),
+            "buy_entry_volume_mult": _nested_value(
+                buy,
+                "entry_quality",
+                "volume_mult"
+            ),
+            "sell_entry_volume_mult": _nested_value(
+                sell,
+                "entry_quality",
+                "volume_mult"
+            ),
             "buy_hard_ok": _side_value(buy, "hard_ok"),
             "sell_hard_ok": _side_value(sell, "hard_ok"),
             "buy_level_ok": _side_value(buy, "level_ok"),
