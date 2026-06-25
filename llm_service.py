@@ -29,7 +29,7 @@ def _load_cache():
     path = _cache_path()
 
     if not path.exists():
-        return {"items": {}}
+        return {"items": {}, "provider_backoff_until": 0}
 
     try:
         with path.open("r", encoding="utf-8") as file:
@@ -38,11 +38,14 @@ def _load_cache():
         if "items" not in cache:
             cache["items"] = {}
 
+        if "provider_backoff_until" not in cache:
+            cache["provider_backoff_until"] = 0
+
         return cache
 
     except Exception as e:
         log_error(f"llm cache load error: {e}")
-        return {"items": {}}
+        return {"items": {}, "provider_backoff_until": 0}
 
 
 def _save_cache(cache):
@@ -93,6 +96,18 @@ def _safe_bool(value):
         return False
 
     return bool(value)
+
+
+def _is_rate_limit_reason(reason):
+    text = str(reason or "").lower()
+    return (
+        "429" in text
+        or "too many requests" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+        or "rate-limit" in text
+        or "quota" in text
+    )
 
 
 def _compact_level(side_data):
@@ -393,6 +408,10 @@ def _get_review(payload):
         return review, "cache", ""
 
     provider = config.LLM_PROVIDER
+    backoff_until = float(cache.get("provider_backoff_until", 0) or 0)
+
+    if backoff_until > now:
+        return None, provider, "LLM_PROVIDER_RATE_LIMIT_BACKOFF"
 
     if provider in ("openai", "openai-compatible", "compatible"):
         review, reason = _request_openai_compatible(payload)
@@ -400,11 +419,21 @@ def _get_review(payload):
         review, reason = None, f"LLM_PROVIDER_UNSUPPORTED:{provider}"
 
     if review is not None:
+        cache["provider_backoff_until"] = 0
         cache["items"][key] = {
             "fetched_at": now,
             "review": review,
         }
         _save_cache(cache)
+    elif _is_rate_limit_reason(reason):
+        cache["provider_backoff_until"] = (
+            now + config.LLM_RATE_LIMIT_BACKOFF_SECONDS
+        )
+        _save_cache(cache)
+        log_warning(
+            f"LLM provider rate limited | "
+            f"backoff={config.LLM_RATE_LIMIT_BACKOFF_SECONDS}s"
+        )
 
     return review, provider, reason
 
@@ -450,7 +479,11 @@ def apply_llm_filter(
     if review is None:
         context = _empty_context(symbol, reason or "LLM_UNAVAILABLE")
         context["source"] = source
-        log_warning(f"{symbol} LLM unavailable | {context.get('reason')}")
+
+        if context.get("reason") == "LLM_PROVIDER_RATE_LIMIT_BACKOFF":
+            log_info(f"{symbol} LLM skipped | RATE_LIMIT_BACKOFF")
+        else:
+            log_warning(f"{symbol} LLM unavailable | {context.get('reason')}")
 
         if config.LLM_FAIL_OPEN:
             return True, analysis, context
