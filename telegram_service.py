@@ -35,18 +35,26 @@ def _fmt_pct(value):
         return str(value)
 
 
+def _tp_status(tp_info, price):
+    if "ok" in tp_info:
+        return "CREATED" if tp_info.get("ok") else "FAILED"
+
+    return "FOUND" if price not in (None, "") else "NOT_FOUND"
+
+
 def _tp_line(tp_info, label="TP"):
     tp_info = tp_info or {}
     price = tp_info.get("tp_price") or tp_info.get("price")
     mode = tp_info.get("tp_mode") or tp_info.get("mode") or tp_info.get("type")
+    status = _tp_status(tp_info, price)
 
     if price in (None, ""):
-        return f"{label}: -"
+        return f"{label}: - | Status: {status}"
 
     if mode:
-        return f"{label}: {_fmt(price)} ({mode})"
+        return f"{label}: {_fmt(price)} ({mode}) | Status: {status}"
 
-    return f"{label}: {_fmt(price)}"
+    return f"{label}: {_fmt(price)} | Status: {status}"
 
 
 def send_telegram_message(message):
@@ -75,7 +83,7 @@ def send_telegram_message(message):
         return True
 
     except Exception as e:
-        log_error(f"Telegram send error: {e}")
+        log_error(f"Telegram send error: {type(e).__name__}")
         return False
 
 
