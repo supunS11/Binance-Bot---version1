@@ -168,3 +168,24 @@ def send_dca_filled_message(
         f"Source: {price_source or '-'}",
     ])
     return send_telegram_message(message)
+
+
+def send_tp_failure_message(
+    symbol,
+    side,
+    context_label,
+    entry_price,
+    quantity,
+    tp_info
+):
+    message = "\n".join([
+        f"{config.TELEGRAM_MESSAGE_PREFIX} | TP FAILED",
+        f"Symbol: {symbol}",
+        f"Side: {side}",
+        f"Context: {context_label or '-'}",
+        f"Entry: {_fmt(entry_price)}",
+        f"Quantity: {_fmt(quantity)}",
+        _tp_line(tp_info),
+        "Action: Check Binance open orders and place TP manually if needed.",
+    ])
+    return send_telegram_message(message)

@@ -68,6 +68,22 @@ def remove_position_state(state, symbol):
         save_trade_state(state)
 
 
+def update_position_tp_status(state, symbol, tp_info, context=""):
+    item = get_position_state(state, symbol)
+
+    if not item:
+        return
+
+    tp_info = tp_info or {}
+    ok = bool(tp_info.get("ok"))
+    item["tp_status"] = "CREATED" if ok else "FAILED"
+    item["tp_price"] = tp_info.get("tp_price")
+    item["tp_mode"] = tp_info.get("tp_mode")
+    item["tp_context"] = context
+    item["tp_updated_at"] = now_iso()
+    upsert_position_state(state, symbol, item)
+
+
 def prune_closed_positions(state, open_positions):
     positions = state.setdefault("positions", {})
     closed_symbols = [
@@ -110,6 +126,9 @@ def create_position_state(
         "dca_count": 0,
         "last_dca_price": None,
         "last_dca_at": None,
+        "tp_status": "PENDING",
+        "tp_price": None,
+        "tp_mode": "",
         "reference_price": reference_price,
         "level_info": level_info or {},
     }

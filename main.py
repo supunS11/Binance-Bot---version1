@@ -39,13 +39,18 @@ from risk_management import calculate_position_size
 from signal_journal import append_signal_journal
 from llm_service import apply_llm_filter, begin_llm_scan_budget
 from news_service import apply_news_filter, prepare_news_scan_context
-from telegram_service import send_order_opened_message, send_dca_filled_message
+from telegram_service import (
+    send_order_opened_message,
+    send_dca_filled_message,
+    send_tp_failure_message
+)
 from trade_state import (
     create_position_state,
     get_position_state,
     load_trade_state,
     prune_closed_positions,
     record_dca_fill,
+    update_position_tp_status,
     upsert_position_state
 )
 from logger import log_info, log_warning, log_error
@@ -465,6 +470,89 @@ def get_updated_position_after_fill(symbol, old_avg, old_quantity, fill_price, f
     return avg_entry, total_quantity, None
 
 
+def place_tp_sl_with_recovery(
+    symbol,
+    side,
+    entry_price,
+    quantity,
+    confirm_df,
+    structure_tp=None,
+    roi_override=None,
+    roi_mode_label=None,
+    context_label="ENTRY",
+    return_details=True
+):
+    attempts = max(int(config.TP_ORDER_RETRY_ATTEMPTS), 1)
+    last_result = {}
+
+    for attempt in range(1, attempts + 1):
+        result = place_tp_sl(
+            symbol,
+            side,
+            entry_price,
+            quantity,
+            confirm_df,
+            structure_tp=structure_tp,
+            roi_override=roi_override,
+            roi_mode_label=roi_mode_label,
+            return_details=True
+        )
+        last_result = result or {}
+
+        if last_result.get("ok"):
+            if attempt > 1:
+                log_info(
+                    f"{symbol} TP recovery succeeded | "
+                    f"CONTEXT={context_label} | ATTEMPT={attempt}"
+                )
+
+            return last_result if return_details else True
+
+        log_warning(
+            f"{symbol} TP placement failed | "
+            f"CONTEXT={context_label} | ATTEMPT={attempt}/{attempts} | "
+            f"MODE={last_result.get('tp_mode')}"
+        )
+
+        if attempt < attempts and config.TP_ORDER_RETRY_DELAY_SECONDS > 0:
+            time.sleep(config.TP_ORDER_RETRY_DELAY_SECONDS)
+
+    if (
+        config.TP_FAILURE_FALLBACK_ROI_ENABLED
+        and roi_override is None
+    ):
+        fallback_roi = config.STRUCTURE_TP_FALLBACK_ROI
+        log_warning(
+            f"{symbol} TP recovery fallback ROI | "
+            f"CONTEXT={context_label} | ROI={fallback_roi}%"
+        )
+        fallback_result = place_tp_sl(
+            symbol,
+            side,
+            entry_price,
+            quantity,
+            confirm_df,
+            structure_tp=None,
+            roi_override=fallback_roi,
+            roi_mode_label=f"TP_RECOVERY_ROI_{fallback_roi}%",
+            return_details=True
+        )
+        last_result = fallback_result or last_result
+
+        if last_result.get("ok"):
+            return last_result if return_details else True
+
+    send_tp_failure_message(
+        symbol,
+        side,
+        context_label,
+        entry_price,
+        quantity,
+        last_result
+    )
+    return last_result if return_details else False
+
+
 def _manage_dca_position_legacy(symbol, state, position_detail, btc_trend_df, btc_trend):
     if not config.DCA_ENABLED:
         log_warning(f"{symbol} already has open position")
@@ -865,13 +953,15 @@ def _manage_dca_position_legacy(symbol, state, position_detail, btc_trend_df, bt
 
     if config.DCA_REPRICE_TP_AFTER_FILL:
         if cancel_open_protection_orders(symbol):
-            protection_ok = place_tp_sl(
+            protection_ok = place_tp_sl_with_recovery(
                 symbol,
                 order_side,
                 avg_entry,
                 total_quantity,
                 confirm_df,
-                structure_tp=structure_tp
+                structure_tp=structure_tp,
+                context_label="LEGACY_DCA",
+                return_details=False
             )
 
             if not protection_ok:
@@ -1143,7 +1233,7 @@ def manage_dca_position(
 
     if config.DCA_REPRICE_TP_AFTER_FILL:
         if cancel_open_protection_orders(symbol):
-            protection_result = place_tp_sl(
+            protection_result = place_tp_sl_with_recovery(
                 symbol,
                 order_side,
                 avg_entry,
@@ -1156,6 +1246,7 @@ def manage_dca_position(
                     if dca_tp_roi is not None
                     else None
                 ),
+                context_label=f"DCA_LEVEL_{dca_count + 1}",
                 return_details=True
             )
             protection_ok = bool(protection_result.get("ok"))
@@ -1168,6 +1259,14 @@ def manage_dca_position(
                 f"{symbol} DCA TP reprice skipped | "
                 f"existing protection cancel failed"
             )
+
+    if new_tp_info:
+        update_position_tp_status(
+            state,
+            symbol,
+            new_tp_info,
+            context=f"DCA_LEVEL_{dca_count + 1}"
+        )
 
     append_signal_journal(
         symbol,
@@ -1958,13 +2057,14 @@ def run_bot():
                     # =========================
                     # PLACE TP/SL
                     # =========================
-                    protection_result = place_tp_sl(
+                    protection_result = place_tp_sl_with_recovery(
                         symbol,
                         side,
                         entry_price,
                         quantity,
                         confirm_df,
                         structure_tp=structure_tp,
+                        context_label="ENTRY",
                         return_details=True
                     )
                     protection_ok = bool(protection_result.get("ok"))
@@ -1979,19 +2079,29 @@ def run_bot():
                         "entry_time": datetime.now(),
                         "side": signal
                     }
+                    position_state = create_position_state(
+                        symbol,
+                        signal,
+                        entry_price,
+                        quantity,
+                        config.MARGIN_PER_TRADE,
+                        initial_margin,
+                        reference_price,
+                        level_info
+                    )
+                    position_state["tp_status"] = (
+                        "CREATED" if protection_ok else "FAILED"
+                    )
+                    position_state["tp_price"] = protection_result.get("tp_price")
+                    position_state["tp_mode"] = protection_result.get("tp_mode")
+                    position_state["tp_context"] = "ENTRY"
+                    position_state["tp_updated_at"] = datetime.now().isoformat(
+                        timespec="seconds"
+                    )
                     upsert_position_state(
                         trade_state,
                         symbol,
-                        create_position_state(
-                            symbol,
-                            signal,
-                            entry_price,
-                            quantity,
-                            config.MARGIN_PER_TRADE,
-                            initial_margin,
-                            reference_price,
-                            level_info
-                        )
+                        position_state
                     )
                     append_signal_journal(
                         symbol,
