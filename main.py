@@ -1565,6 +1565,453 @@ class DcaWebsocketMonitor:
         )
 
 
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def calculate_signal_rank(candidate):
+    signal = candidate.get("signal")
+    analysis = candidate.get("analysis") or {}
+    side_data = analysis.get((signal or "").lower(), {}) or {}
+    news_context = candidate.get("news_context") or {}
+    llm_context = candidate.get("llm_context") or {}
+    rank = _safe_float(side_data.get("confidence"), analysis.get("best_confidence", 0))
+
+    rank += _safe_float(side_data.get("quality_score")) * config.SIGNAL_RANKING_QUALITY_WEIGHT
+    rank += _safe_float(side_data.get("participation_score")) * config.SIGNAL_RANKING_FLOW_WEIGHT
+    rank += _safe_float(side_data.get("smc_score")) * config.SIGNAL_RANKING_SMC_WEIGHT
+    rank += _safe_float(side_data.get("regime_score")) * config.SIGNAL_RANKING_REGIME_WEIGHT
+
+    news_action = str(news_context.get("action") or "").upper()
+    llm_action = str(llm_context.get("action") or "").upper()
+    risk_label = str(llm_context.get("risk_label") or "").lower()
+
+    if news_action == "BOOST":
+        rank += 2
+    elif news_action == "PENALTY":
+        rank -= 2
+
+    if llm_action == "BOOST":
+        rank += 2
+    elif llm_action == "PENALTY":
+        rank -= 2
+
+    if risk_label == "high":
+        rank -= 4
+    elif risk_label == "medium":
+        rank -= 1.5
+
+    return round(rank, 2)
+
+
+def build_entry_candidate(
+    symbol,
+    signal,
+    final_analysis,
+    participation,
+    trend_df,
+    confirm_df,
+    entry_df,
+    btc_trend,
+    btc_corr,
+    rs,
+    news_context,
+    llm_context
+):
+    candidate = {
+        "symbol": symbol,
+        "signal": signal,
+        "analysis": final_analysis,
+        "participation": participation,
+        "trend_df": trend_df,
+        "confirm_df": confirm_df,
+        "entry_df": entry_df,
+        "btc_trend": btc_trend,
+        "btc_corr": btc_corr,
+        "rs": rs,
+        "news_context": news_context,
+        "llm_context": llm_context,
+    }
+    candidate["rank_score"] = calculate_signal_rank(candidate)
+    return candidate
+
+
+def execute_entry_candidate(
+    candidate,
+    trade_state,
+    position_details,
+    open_positions,
+    btc_trend_df,
+    dca_monitor
+):
+    symbol = candidate["symbol"]
+    signal = candidate["signal"]
+    final_analysis = candidate["analysis"]
+    participation = candidate["participation"]
+    trend_df = candidate["trend_df"]
+    confirm_df = candidate["confirm_df"]
+    entry_df = candidate["entry_df"]
+    btc_trend = candidate["btc_trend"]
+    btc_corr = candidate["btc_corr"]
+    rs = candidate["rs"]
+    news_context = candidate["news_context"]
+    llm_context = candidate["llm_context"]
+
+    try:
+        latest_position_details = get_open_position_details()
+
+        if latest_position_details is None:
+            log_warning(
+                f"{symbol} live position snapshot unavailable; skipping entry"
+            )
+            return position_details, open_positions, False
+
+        position_details = latest_position_details
+        open_positions = get_open_position_amounts(position_details)
+        prune_closed_positions(trade_state, open_positions)
+        dca_monitor.sync(position_details)
+
+        if symbol in open_positions:
+            run_dca_check(
+                symbol,
+                position_details[symbol],
+                btc_trend_df,
+                btc_trend,
+                price_source="scan"
+            )
+            return position_details, open_positions, False
+
+        counts = get_open_position_counts(open_positions)
+        log_info(
+            f"{symbol} LIVE POSITION COUNT | "
+            f"TOTAL={counts['total']} | BUY={counts['buy']} | SELL={counts['sell']}"
+        )
+
+        if config.MAX_TOTAL_POSITIONS and counts["total"] >= config.MAX_TOTAL_POSITIONS:
+            log_warning(
+                f"MAX POSITIONS REACHED | "
+                f"TOTAL={counts['total']}/{config.MAX_TOTAL_POSITIONS} | "
+                f"BUY={counts['buy']} | SELL={counts['sell']}"
+            )
+            return position_details, open_positions, False
+
+        if (
+            signal == "BUY"
+            and config.MAX_BUY_POSITIONS
+            and counts["buy"] >= config.MAX_BUY_POSITIONS
+        ):
+            log_warning(
+                f"MAX BUY POSITIONS REACHED | "
+                f"BUY={counts['buy']}/{config.MAX_BUY_POSITIONS} | "
+                f"TOTAL={counts['total']}"
+            )
+            return position_details, open_positions, False
+
+        if (
+            signal == "SELL"
+            and config.MAX_SELL_POSITIONS
+            and counts["sell"] >= config.MAX_SELL_POSITIONS
+        ):
+            log_warning(
+                f"MAX SELL POSITIONS REACHED | "
+                f"SELL={counts['sell']}/{config.MAX_SELL_POSITIONS} | "
+                f"TOTAL={counts['total']}"
+            )
+            return position_details, open_positions, False
+
+        current_price = entry_df["close"].iloc[-2]
+
+        if config.LIVE_ENTRY_CONFIRMATION_ENABLED:
+            guard_ok, current_price, guard_info = check_live_entry_guard(
+                symbol,
+                signal,
+                current_price
+            )
+
+            if not guard_ok:
+                log_live_guard_block(symbol, guard_info)
+                append_signal_journal(
+                    symbol,
+                    final_analysis,
+                    participation,
+                    trend_df,
+                    confirm_df,
+                    entry_df,
+                    btc_trend,
+                    btc_corr,
+                    rs,
+                    action="SKIPPED_LIVE_GUARD",
+                    skip_reason=guard_info.get("reason"),
+                    news_context=news_context,
+                    llm_context=llm_context
+                )
+                return position_details, open_positions, False
+
+            log_info(
+                f"{symbol} LIVE ENTRY GUARD OK | "
+                f"MARK={current_price} | {guard_info.get('reason')}"
+            )
+
+        room_ok, room_info = validate_entry_profit_room(
+            signal,
+            current_price,
+            trend_df,
+            confirm_df,
+            leverage=config.LEVERAGE
+        )
+
+        if not room_ok:
+            log_warning(f"{symbol} SKIP | {room_info.get('reason')}")
+            append_signal_journal(
+                symbol,
+                final_analysis,
+                participation,
+                trend_df,
+                confirm_df,
+                entry_df,
+                btc_trend,
+                btc_corr,
+                rs,
+                action="SKIPPED_PROFIT_ROOM",
+                skip_reason=room_info.get("reason"),
+                news_context=news_context,
+                llm_context=llm_context
+            )
+            return position_details, open_positions, False
+
+        log_profit_room_ok(symbol, signal, room_info)
+
+        level_ok, level_info = validate_adverse_zone_level(
+            signal,
+            current_price,
+            trend_df,
+            confirm_df,
+            leverage=config.LEVERAGE
+        )
+
+        if not level_ok:
+            log_warning(f"{symbol} SKIP | {level_info.get('reason')}")
+            return position_details, open_positions, False
+
+        reference_price = level_info["level"]
+        adverse_roi = level_info["adverse_roi"]
+        level_label = "SUPPORT" if signal == "BUY" else "RESISTANCE"
+
+        log_info(
+            f"{symbol} {level_label} SAFETY LEVEL | "
+            f"PRICE={reference_price} | ROI={adverse_roi}% | "
+            f"SCORE={level_info['score']} | SRC={level_info['source']}"
+        )
+
+        balance = get_balance()
+        initial_margin = get_initial_trade_margin()
+        quantity = calculate_position_size(
+            balance,
+            current_price,
+            reference_price,
+            symbol,
+            initial_margin
+        )
+        notional = quantity * current_price
+        log_info(f"{symbol} QTY={quantity} | NOTIONAL={notional:.2f}")
+
+        if quantity <= 0:
+            log_warning(f"{symbol} SKIPPED | INVALID QTY")
+            return position_details, open_positions, False
+
+        notional_ok, notional = validate_min_notional(
+            symbol,
+            quantity,
+            current_price
+        )
+
+        if not notional_ok:
+            log_warning(f"{symbol} SKIP | NOTIONAL TOO LOW: {notional}")
+            return position_details, open_positions, False
+
+        if not set_margin_type(symbol):
+            return position_details, open_positions, False
+
+        if not setup_leverage(symbol):
+            return position_details, open_positions, False
+
+        side = SIDE_BUY if signal == "BUY" else SIDE_SELL
+        order = place_market_order(symbol, side, quantity)
+
+        if not order:
+            return position_details, open_positions, False
+
+        entry_price = get_entry_price(symbol, order)
+
+        if entry_price <= 0:
+            entry_price = current_price
+            log_warning(
+                f"{symbol} ENTRY PRICE UNAVAILABLE | USING CURRENT PRICE FOR TP"
+            )
+
+        structure_tp = None
+
+        if not config.STATIC_TP_ENABLED:
+            tp_ok, structure_tp = validate_structure_take_profit(
+                signal,
+                entry_price,
+                trend_df,
+                confirm_df,
+                leverage=config.LEVERAGE
+            )
+
+            if tp_ok:
+                log_info(
+                    f"{symbol} STRUCTURE TP | "
+                    f"TARGET={structure_tp['target_price']} | "
+                    f"RAW_LEVEL={structure_tp['raw_level']} | "
+                    f"ROI={structure_tp['target_roi']}% | "
+                    f"SRC={structure_tp['source']}"
+                )
+            else:
+                log_warning(
+                    f"{symbol} {structure_tp['reason']} | USING FALLBACK ROI TP"
+                )
+
+        protection_result = place_tp_sl_with_recovery(
+            symbol,
+            side,
+            entry_price,
+            quantity,
+            confirm_df,
+            structure_tp=structure_tp,
+            context_label="ENTRY",
+            return_details=True
+        )
+        protection_ok = bool(protection_result.get("ok"))
+
+        if not protection_ok:
+            log_warning(f"{symbol} TP ORDER NOT CREATED")
+
+        trade_times[symbol] = {
+            "entry_time": datetime.now(),
+            "side": signal
+        }
+        position_state = create_position_state(
+            symbol,
+            signal,
+            entry_price,
+            quantity,
+            config.MARGIN_PER_TRADE,
+            initial_margin,
+            reference_price,
+            level_info
+        )
+        position_state["tp_status"] = "CREATED" if protection_ok else "FAILED"
+        position_state["tp_price"] = protection_result.get("tp_price")
+        position_state["tp_mode"] = protection_result.get("tp_mode")
+        position_state["tp_context"] = "ENTRY"
+        position_state["tp_updated_at"] = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        upsert_position_state(trade_state, symbol, position_state)
+        append_signal_journal(
+            symbol,
+            final_analysis,
+            participation,
+            trend_df,
+            confirm_df,
+            entry_df,
+            btc_trend,
+            btc_corr,
+            rs,
+            action="TRADE_OPENED",
+            news_context=news_context,
+            llm_context=llm_context
+        )
+
+        log_info(
+            f"*** {symbol} TRADE OPENED ***\n"
+            f"ENTRY: {entry_price}\n"
+            f"{level_label}: {reference_price}\n"
+            f"ADVERSE ROI TO LEVEL: {adverse_roi}%\n"
+            f"SL: {'ENABLED' if config.SL_ENABLED else 'DISABLED'}\n"
+            f"BALANCE: {balance}\n"
+        )
+        send_order_opened_message(
+            symbol,
+            signal,
+            entry_price,
+            quantity,
+            initial_margin,
+            protection_result,
+            final_analysis,
+            news_context,
+            llm_context
+        )
+
+        open_positions[symbol] = quantity if signal == "BUY" else -quantity
+        order_counts = get_open_position_counts(open_positions)
+        latest_position_details = get_open_position_details()
+
+        if latest_position_details is not None:
+            position_details = latest_position_details
+            open_positions = get_open_position_amounts(position_details)
+            dca_monitor.sync(latest_position_details)
+
+        log_info(
+            f"{symbol} OPENED | TOTAL={order_counts['total']} | "
+            f"BUY={order_counts['buy']} | SELL={order_counts['sell']}"
+        )
+
+        if config.POST_TRADE_SLEEP_SECONDS > 0:
+            time.sleep(config.POST_TRADE_SLEEP_SECONDS)
+
+        return position_details, open_positions, True
+
+    except Exception as e:
+        log_error(f"{symbol} ENTRY EXECUTION ERROR: {e}")
+        return position_details, open_positions, False
+
+
+def process_ranked_entry_candidates(
+    candidates,
+    trade_state,
+    position_details,
+    open_positions,
+    btc_trend_df,
+    dca_monitor
+):
+    if not candidates:
+        return position_details, open_positions
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: item.get("rank_score", 0),
+        reverse=True
+    )
+
+    if config.SIGNAL_RANKING_MAX_CANDIDATES > 0:
+        ranked = ranked[:config.SIGNAL_RANKING_MAX_CANDIDATES]
+
+    log_info(f"SIGNAL RANKING | CANDIDATES={len(ranked)}")
+
+    for index, candidate in enumerate(ranked, start=1):
+        log_info(
+            f"RANK {index}/{len(ranked)} | "
+            f"{candidate['symbol']} {candidate['signal']} | "
+            f"SCORE={candidate.get('rank_score')}"
+        )
+        position_details, open_positions, _ = execute_entry_candidate(
+            candidate,
+            trade_state,
+            position_details,
+            open_positions,
+            btc_trend_df,
+            dca_monitor
+        )
+
+    return position_details, open_positions
+
+
 def run_bot():
 
     log_info("BOT STARTED")
@@ -1597,6 +2044,7 @@ def run_bot():
             btc_trend_df, btc_trend = get_cached_btc_context()
             log_info(f"BTC TREND: {btc_trend}")
             futures_context_fetches = 0
+            signal_candidates = []
             begin_llm_scan_budget()
             prepare_news_scan_context(scan_symbols)
 
@@ -1805,6 +2253,28 @@ def run_bot():
                         f"{llm_context.get('risk_label')} "
                         f"ADJ={llm_context.get('confidence_adjustment')}"
                     )
+
+                    if config.SIGNAL_RANKING_ENABLED:
+                        candidate = build_entry_candidate(
+                            symbol,
+                            signal,
+                            final_analysis,
+                            participation,
+                            trend_df,
+                            confirm_df,
+                            entry_df,
+                            btc_trend,
+                            btc_corr,
+                            rs,
+                            news_context,
+                            llm_context
+                        )
+                        signal_candidates.append(candidate)
+                        log_info(
+                            f"{symbol} SIGNAL QUEUED | "
+                            f"RANK_SCORE={candidate['rank_score']}"
+                        )
+                        continue
 
                     # =========================
                     # LIVE POSITION LIMITS
@@ -2158,6 +2628,16 @@ def run_bot():
 
                 except Exception as e:
                     log_error(f"{symbol} ERROR: {e}")
+
+            if config.SIGNAL_RANKING_ENABLED:
+                position_details, open_positions = process_ranked_entry_candidates(
+                    signal_candidates,
+                    trade_state,
+                    position_details,
+                    open_positions,
+                    btc_trend_df,
+                    dca_monitor
+                )
 
             log_info("Waiting next scan...")
             time.sleep(config.SCAN_SLEEP_SECONDS)
